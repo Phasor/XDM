@@ -13,9 +13,11 @@ export interface XAdapter {
 type SnapshotLine = { ref: string; kind: string; label: string };
 
 export class PinchTabAdapter implements XAdapter {
-  // Default port is 9867 — update PINCHTAB_URL in your .env if different
+  // Default port is 9867 — update PINCHTAB_URL in your .env if different.
+  // When running as a systemd daemon, PinchTab exposes bare top-level endpoints:
+  //   POST /navigate, GET /snapshot, POST /action, POST /evaluate
+  // No instance ID or tab ID needed.
   private readonly baseUrl: string;
-  private tabId: string | null = null;
 
   constructor() {
     this.baseUrl = process.env.PINCHTAB_URL ?? "http://localhost:9867";
@@ -40,60 +42,20 @@ export class PinchTabAdapter implements XAdapter {
     return ct.includes("application/json") ? res.json() : res.text();
   }
 
-  /** Find or open the persistent DM tab. Re-uses across poll cycles. */
-  private async ensureTab(): Promise<string> {
-    if (this.tabId) return this.tabId;
-
-    // When PinchTab runs as a daemon it starts Chrome directly, so /instances
-    // returns []. Use GET /tabs to grab the existing tab instead.
-    // Response shape: {"tabs": [...]} not a flat array.
-    const tabsRes = (await this.api("GET", "/tabs")) as
-      | { tabs: Array<{ id: string; url: string }> }
-      | Array<{ id: string; url: string }>;
-    const tabs = Array.isArray(tabsRes) ? tabsRes : (tabsRes.tabs ?? []);
-
-    if (tabs.length > 0) {
-      this.tabId = tabs[0].id;
-      return this.tabId;
-    }
-
-    // Fallback: no tabs yet — start an instance from the first available profile.
-    const profiles = (await this.api("GET", "/profiles")) as Array<{
-      id: string;
-      name: string;
-    }>;
-    if (profiles.length === 0) {
-      throw new Error("No PinchTab profiles found. Create one and log into X first.");
-    }
-    const instance = (await this.api("POST", "/instances/start", {
-      profileId: profiles[0].id,
-      mode: "headless",
-    })) as { id: string };
-    await sleep(4000); // wait for Chrome to be ready
-    const tab = (await this.api("POST", `/instances/${instance.id}/tabs/open`, {
-      url: "https://x.com/messages",
-    })) as { tabId: string };
-    this.tabId = tab.tabId;
-    return this.tabId;
-  }
-
   private async navigate(url: string, waitMs = 2500): Promise<void> {
-    const tabId = await this.ensureTab();
-    await this.api("POST", `/tabs/${tabId}/navigate`, { url, timeout: 20 });
+    await this.api("POST", "/navigate", { url, timeout: 20 });
     await sleep(waitMs);
   }
 
   private async evaluate<T>(expression: string): Promise<T> {
-    const tabId = await this.ensureTab();
-    const result = await this.api("POST", `/tabs/${tabId}/evaluate`, { expression });
+    const result = await this.api("POST", "/evaluate", { expression });
     return result as T;
   }
 
   private async snapshot(): Promise<SnapshotLine[]> {
-    const tabId = await this.ensureTab();
     const raw = (await this.api(
       "GET",
-      `/tabs/${tabId}/snapshot?interactive=true&compact=true`
+      "/snapshot?interactive=true&compact=true"
     )) as string;
     return raw
       .split("\n")
@@ -110,8 +72,7 @@ export class PinchTabAdapter implements XAdapter {
     text?: string,
     key?: string
   ): Promise<void> {
-    const tabId = await this.ensureTab();
-    await this.api("POST", `/tabs/${tabId}/action`, { kind, ref, text, key });
+    await this.api("POST", "/action", { kind, ref, text, key });
   }
 
   private findRef(
