@@ -1,0 +1,18 @@
+[Unit]
+Description=XDM Agent Core daemon
+After=network.target pinchtab.service
+Requires=pinchtab.service
+
+[Service]
+Type=simple
+User=xdm
+WorkingDirectory=/opt/xdm-agent
+EnvironmentFile=/opt/xdm-agent/.env
+ExecStart=/usr/bin/node /opt/xdm-agent/packages/agent-core/dist/index.js
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

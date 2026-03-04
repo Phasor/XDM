@@ -1,0 +1,16 @@
+[Unit]
+Description=PinchTab X/Twitter browser automation daemon
+After=network.target
+
+[Service]
+Type=simple
+User=xdm
+WorkingDirectory=/opt/xdm-agent
+ExecStart=/usr/local/bin/pinchtab --profile-dir=/opt/xdm-agent/profiles --port=9000
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
