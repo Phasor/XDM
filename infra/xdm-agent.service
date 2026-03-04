@@ -5,10 +5,15 @@ Requires=pinchtab.service
 
 [Service]
 Type=simple
-User=xdm
+User=ben
 WorkingDirectory=/opt/xdm-agent
 EnvironmentFile=/opt/xdm-agent/.env
-ExecStart=/usr/bin/node /opt/xdm-agent/packages/agent-core/dist/index.js
+
+# Uses tsx to run TypeScript directly (no build step required).
+# Once stable, switch to: node /opt/xdm-agent/packages/agent-core/dist/index.js
+# and add a build step.
+ExecStart=/usr/bin/node /opt/xdm-agent/node_modules/.bin/tsx /opt/xdm-agent/packages/agent-core/src/index.ts
+
 Restart=always
 RestartSec=15
 StandardOutput=journal

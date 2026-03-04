@@ -1,12 +1,18 @@
 [Unit]
-Description=PinchTab X/Twitter browser automation daemon
+Description=PinchTab browser automation daemon
 After=network.target
 
 [Service]
 Type=simple
-User=xdm
-WorkingDirectory=/opt/xdm-agent
-ExecStart=/usr/local/bin/pinchtab --profile-dir=/opt/xdm-agent/profiles --port=9000
+User=ben
+WorkingDirectory=/home/ben
+
+# PINCHTAB_BINARY_PATH tells the pinchtab wrapper which versioned binary to use.
+# Update the version string if you upgrade PinchTab.
+Environment=PINCHTAB_BINARY_PATH=/home/ben/.pinchtab/bin/0.7.6/pinchtab-linux-amd64
+
+ExecStart=/home/ben/.npm-global/bin/pinchtab
+
 Restart=always
 RestartSec=10
 StandardOutput=journal
