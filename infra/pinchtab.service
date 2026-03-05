@@ -10,6 +10,7 @@ WorkingDirectory=/home/ben
 # PINCHTAB_BINARY_PATH tells the pinchtab wrapper which versioned binary to use.
 # Update the version string if you upgrade PinchTab.
 Environment=PINCHTAB_BINARY_PATH=/home/ben/.pinchtab/bin/0.7.6/pinchtab-linux-amd64
+Environment=BRIDGE_STEALTH=full
 
 ExecStart=/home/ben/.npm-global/bin/pinchtab
 
