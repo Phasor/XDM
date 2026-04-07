@@ -1,0 +1,30 @@
+# Virtual environment
+venv/
+
+# Chrome profile data
+chrome_profile/
+
+# Cookies / session data
+cookies/
+
+# Downloaded files
+downloaded_files/
+
+# Config with credentials (use env vars or create locally)
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/

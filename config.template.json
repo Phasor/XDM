@@ -1,0 +1,36 @@
+{
+    "logging_level": "INFO",
+    "chrome": {
+        "headless": false,
+        "proxy": "",
+        "undetected_chromedirver": true,
+        "width_height": [780, 820],
+        "window_position": [755, 0],
+        "user_data_dir": "chrome_profile"
+    },
+    "x.com": {
+        "username": "",
+        "password": "",
+        "passcode": "0000",
+        "polling_interval": 5
+    },
+    "supabase": {
+        "project_url": "",
+        "secret_key": "",
+        "db_url": "",
+        "conversations_table": "conversations",
+        "messages_table": "messages",
+        "context_message_limit": 20
+    },
+    "openrouter": {
+        "api_key": "",
+        "model": "openai/gpt-3.5-turbo",
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "timeout": 30,
+        "personality_file": "prompts/personality.txt"
+    },
+    "urls": {
+        "base": "https://x.com/",
+        "chat": "https://x.com/i/chat"
+    }
+}
