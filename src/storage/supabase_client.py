@@ -1,10 +1,33 @@
 from datetime import datetime, timezone
 import logging
 import os
+import time as _time
+from functools import wraps
 from httpx import HTTPError
 from postgrest import APIError
 import psycopg
 from supabase import create_client, Client
+
+
+def _retry_on_network_error(max_retries=3, base_delay=2):
+    "Retry decorator for transient network errors with exponential backoff"
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(self, *args, **kwargs)
+                except (HTTPError, ConnectionError, OSError) as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    delay = base_delay * (2 ** attempt)
+                    self.logger.warning(
+                        "Retry %d/%d for %s: %s",
+                        attempt + 1, max_retries, func.__name__, e,
+                    )
+                    _time.sleep(delay)
+        return wrapper
+    return decorator
 
 
 class SupaBase:
@@ -74,6 +97,7 @@ class SupaBase:
     # Conversations
     # =========================
 
+    @_retry_on_network_error()
     def upsert_conversation(self, conversation_id: str, username: str):
         """Create or update conversation safely"""
         try:
@@ -90,12 +114,14 @@ class SupaBase:
             )
             return res.data[0]
         except (APIError, HTTPError) as e:
-            raise RuntimeError(f"Failed to upsert conversation: {e}") from e
+            self.logger.error("Failed to upsert conversation: %s", e)
+            return None
 
+    @_retry_on_network_error()
     def update_last_message_time(self, conversation_id: str):
         """Update last message timestamp"""
         self.logger.debug("Updating last_message_at: %s", conversation_id)
-        iso_time = datetime.now(timezone.utc).isoformat()  # <-- convert to string
+        iso_time = datetime.now(timezone.utc).isoformat()
         try:
             (
                 self.client.table(self.conv_table)
@@ -105,24 +131,26 @@ class SupaBase:
             )
             self.logger.info("last_message_at updated: %s", conversation_id)
         except (APIError, HTTPError) as e:
-            raise RuntimeError(f"Failed to update last_message_at: {e}") from e
+            self.logger.error("Failed to update last_message_at: %s", e)
 
     # =========================
     # Messages
     # =========================
 
+    @_retry_on_network_error()
     def save_message(self, conv_id, message_id, sender, text):
-        """Insert message into database"""
+        """Insert message into database (upsert to handle re-processing after crash)"""
         try:
             res = (
                 self.client.table(self.msgs_table)
-                .insert(
+                .upsert(
                     {
                         "conversation_id": conv_id,
                         "message_id": message_id,
                         "sender": sender,
                         "message_text": text,
-                    }
+                    },
+                    on_conflict="message_id",
                 )
                 .execute()
             )
@@ -130,8 +158,10 @@ class SupaBase:
             return res
 
         except (APIError, HTTPError) as e:
-            raise RuntimeError(f"Failed to save message: {e}") from e
+            self.logger.error("Failed to save message: %s", e)
+            return None
 
+    @_retry_on_network_error()
     def get_messages(self, conversation_id):
         """Fetch recent messages for a conversation"""
         try:
@@ -148,8 +178,10 @@ class SupaBase:
             return res.data
 
         except (APIError, HTTPError) as e:
-            raise RuntimeError(f"Failed to fetch messages: {e}") from e
+            self.logger.error("Failed to fetch messages: %s", e)
+            return []
 
+    @_retry_on_network_error()
     def get_latest_message_id(self, conversation_id: str):
         """Return latest message_id for a conversation"""
         try:
@@ -162,7 +194,8 @@ class SupaBase:
                 .execute()
             )
         except (APIError, HTTPError) as e:
-            raise RuntimeError(f"Failed to fetch latest message ID: {e}") from e
+            self.logger.error("Failed to fetch latest message ID: %s", e)
+            return None
 
         if res.data:
             msg_id = res.data[0]["message_id"]

@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import requests
 
 
@@ -18,29 +19,38 @@ class LLM:
         with open(config["openrouter"]["personality_file"], "r", encoding="utf-8") as f:
             self.personality = f.read()
 
-    def get_response(self, new_chat, chat_history):
-        "Send messages to LLM and get response"
+    def get_response(self, new_chat, chat_history, max_retries=2):
+        "Send messages to LLM and get response, with retry for transient errors"
         messages = self.get_conversation_context(chat_history, new_chat)
-        try:
-            response = requests.post(
-                self.endpoint,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                },
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    self.endpoint,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                    },
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
 
-        except requests.exceptions.RequestException as e:
-            self.logger.error("Error: %s", e)
-            return None
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning("LLM request failed (attempt %d), retrying: %s", attempt + 1, e)
+                    time.sleep(2)
+                    continue
+                self.logger.error("LLM request failed after %d attempts: %s", max_retries, e)
+                return None
+
+            except requests.exceptions.RequestException as e:
+                self.logger.error("LLM error: %s", e)
+                return None
 
     def get_conversation_context(self, chat_history, new_chat):
         """Return formatted conversation for LLM with merged user messages"""

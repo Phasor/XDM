@@ -11,6 +11,21 @@ Restart=always
 RestartSec=30
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=xdm
+
+# Prevent infinite rapid restart loops (max 10 restarts per 10 minutes)
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# Clean shutdown: SIGTERM to main process, SIGKILL to Chrome children after timeout
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Resource limits to prevent Chrome from consuming all VPS memory
+MemoryMax=2G
+CPUQuota=80%
+LimitNOFILE=4096
 
 # Environment variables (uncomment and fill in to use env vars instead of config.json)
 # Environment=X_USERNAME=your_username

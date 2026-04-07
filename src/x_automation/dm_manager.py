@@ -4,7 +4,11 @@ import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, WebDriverException
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    StaleElementReferenceException,
+    WebDriverException,
+)
 
 
 class DmListener:
@@ -18,6 +22,7 @@ class DmListener:
         self.chats = {}
         self.prev_chats = {}
         self.first_run = True
+        self._startup_queue = []  # unread conv_ids to process on startup
 
     def detect_new_message(self):
         "Run one detection cycle and return first change or None."
@@ -41,13 +46,23 @@ class DmListener:
             self.prev_chats = copy.deepcopy(self.chats)
             self.first_run = False
 
-            # Process any unread messages that arrived while bot was offline
+            # Queue all unread messages that arrived while bot was offline
             for conv_id, data in self.chats.items():
                 if data["unread"] and data["author"] != "assistant":
-                    self.logger.info("Unread message found from while offline: %s", conv_id)
-                    return conv_id, "new_message", data
+                    self._startup_queue.append(conv_id)
 
-            return None
+            if self._startup_queue:
+                self.logger.info(
+                    "Found %d unread conversations from while offline.",
+                    len(self._startup_queue),
+                )
+
+        # Drain startup queue before normal diff detection
+        while self._startup_queue:
+            conv_id = self._startup_queue.pop(0)
+            if conv_id in self.chats:
+                self.logger.info("Processing offline unread: %s", conv_id)
+                return conv_id, "new_message", self.chats[conv_id]
 
         for conv_id, data in self.chats.items():
             prev = self.prev_chats.get(conv_id)
@@ -79,36 +94,40 @@ class DmListener:
         new_chats = {}
 
         for item in items:
-            aria = item.get_attribute("aria-description") or ""
-            testid = item.get_attribute("data-testid") or ""
-            span_elem = item.find_elements(By.TAG_NAME, "span")
+            try:
+                aria = item.get_attribute("aria-description") or ""
+                testid = item.get_attribute("data-testid") or ""
+                span_elem = item.find_elements(By.TAG_NAME, "span")
 
-            if span_elem and span_elem[0].text.strip() == "You:":
-                author = "assistant"
-            else:
-                author = "user"
+                if span_elem and span_elem[0].text.strip() == "You:":
+                    author = "assistant"
+                else:
+                    author = "user"
 
-            parts = [p.strip() for p in aria.split(",")]
+                parts = [p.strip() for p in aria.split(",")]
 
-            username = parts[1].lstrip("@") if len(parts) > 1 else ""
-            unread = parts[-1].lower() == "unread"
+                username = parts[1].lstrip("@") if len(parts) > 1 else ""
+                unread = parts[-1].lower() == "unread"
 
-            if unread:
-                message_parts = parts[2:-2]
-            else:
-                message_parts = parts[2:-1]
+                if unread:
+                    message_parts = parts[2:-2]
+                else:
+                    message_parts = parts[2:-1]
 
-            last_message = ", ".join(message_parts).strip()
+                last_message = ", ".join(message_parts).strip()
 
-            conv_id_raw = testid.replace("dm-conversation-item-", "")
-            conv_id = conv_id_raw.replace(":", "-")
+                conv_id_raw = testid.replace("dm-conversation-item-", "")
+                conv_id = conv_id_raw.replace(":", "-")
 
-            new_chats[conv_id] = {
-                "username": username,
-                "author": author,
-                "last_message": last_message,
-                "unread": unread,
-            }
+                new_chats[conv_id] = {
+                    "username": username,
+                    "author": author,
+                    "last_message": last_message,
+                    "unread": unread,
+                }
+            except (StaleElementReferenceException, WebDriverException):
+                self.logger.debug("Stale element during conversation extraction, skipping.")
+                continue
 
         self.chats = new_chats
 
@@ -177,39 +196,46 @@ class OpenChat:
                 msg_box = li.find_element(By.CSS_SELECTOR, '[data-testid^="message-"]')
             except NoSuchElementException:
                 continue
-
-            # --- detect author and message ID ---
-            classes = msg_box.get_attribute("class")
-            message_id = msg_box.get_attribute("data-testid")
-
-            if "justify-end" in classes:
-                author = "assistant"
-            elif "justify-start" in classes:
-                author = "user"
-            else:
-                self.logger.warning("Unknown message format, skipping.")
+            except StaleElementReferenceException:
                 continue
 
-            # --- extract text ---
             try:
-                text_elem = msg_box.find_element(
-                    By.CSS_SELECTOR, '[data-testid^="message-text-"] span[dir="auto"]'
-                )
-            except NoSuchElementException:
-                self.logger.warning("Message type is not supported, skipping.")
+                # --- detect author and message ID ---
+                classes = msg_box.get_attribute("class")
+                message_id = msg_box.get_attribute("data-testid")
+
+                if "justify-end" in classes:
+                    author = "assistant"
+                elif "justify-start" in classes:
+                    author = "user"
+                else:
+                    self.logger.warning("Unknown message format, skipping.")
+                    continue
+
+                # --- extract text ---
+                try:
+                    text_elem = msg_box.find_element(
+                        By.CSS_SELECTOR,
+                        '[data-testid^="message-text-"] span[dir="auto"]',
+                    )
+                except NoSuchElementException:
+                    self.logger.warning("Message type is not supported, skipping.")
+                    continue
+
+                text = text_elem.get_attribute("innerText").strip()
+
+                if text:
+                    results.append(
+                        {"message_id": message_id, "author": author, "text": text}
+                    )
+            except StaleElementReferenceException:
+                self.logger.debug("Stale element during message extraction, skipping.")
                 continue
-
-            text = text_elem.get_attribute("innerText").strip()
-
-            if text:
-                results.append(
-                    {"message_id": message_id, "author": author, "text": text}
-                )
 
         return results
 
     def send_message(self, text):
-        "Send message to opened chat"
+        "Send message to opened chat. Returns True if send was verified."
         try:
             textarea = self.driver.find_element(
                 By.CSS_SELECTOR, '[data-testid="dm-composer-textarea"]'
@@ -223,8 +249,19 @@ class OpenChat:
                 By.CSS_SELECTOR, '[data-testid="dm-composer-send-button"]'
             ).click()
 
+            # Verify the message appeared
+            time.sleep(2)
+            messages = self.extract_messages()
+            if messages and messages[-1]["author"] == "assistant":
+                self.logger.info("Message sent and verified.")
+                return True
+
+            self.logger.warning("Message send could not be verified.")
+            return False
+
         except NoSuchElementException as e:
             self.logger.error("Failed to send message, element not found: %s", str(e))
+            return False
 
     def get_last_message_id(self):
         "Get message ID of the last message in the opened chat"

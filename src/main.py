@@ -1,7 +1,10 @@
 import json
 import logging
+import logging.handlers
 import os
+import subprocess
 import time
+import traceback
 from selenium.common import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -59,11 +62,22 @@ class Chrome:
 
     def driver(self):
         "Initialize Chrome driver"
+        chrome_args = ",".join([
+            "--disable-application-cache",
+            "--disk-cache-size=0",
+            "--disable-cache",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-background-networking",
+        ])
         self.driver_instance = Driver(
             uc=self.config["chrome"]["undetected_chromedirver"],
+            headless2=self.config["chrome"].get("headless", False),
             user_data_dir=os.path.abspath(self.config["chrome"]["user_data_dir"]),
             proxy=self.config["chrome"]["proxy"] or None,
-            chromium_arg="--disable-application-cache,--disk-cache-size=0,--disable-cache",
+            chromium_arg=chrome_args,
         )
 
         self.driver_instance.set_window_position(
@@ -73,10 +87,22 @@ class Chrome:
         self.logger.info("Chrome driver initialized successfully")
         return self.driver_instance
 
+    def is_alive(self):
+        "Check if the Chrome driver is still responsive"
+        try:
+            _ = self.driver_instance.title
+            return True
+        except Exception:
+            return False
+
     def close(self):
         "Close running chrome instance"
         if self.driver_instance:
-            self.driver_instance.quit()
+            try:
+                self.driver_instance.quit()
+            except Exception:
+                pass
+            self.driver_instance = None
             self.logger.info("Chrome driver closed successfully")
         else:
             self.logger.warning("No running chrome driver found to close")
@@ -88,16 +114,28 @@ class XAutomation:
     def __init__(self):
         self.config = self.load_config()
 
-        logging.basicConfig(
-            level=(
-                logging.INFO
-                if self.config["logging_level"] == "INFO"
-                else logging.DEBUG
-            ),
-            # level=logging.INFO,
-            format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-            datefmt="%H:%M:%S",
+        log_level = (
+            logging.INFO
+            if self.config["logging_level"] == "INFO"
+            else logging.DEBUG
         )
+        log_format = "%(asctime)s | %(process)d | %(name)s | %(levelname)s | %(message)s"
+        log_datefmt = "%Y-%m-%d %H:%M:%S"
+
+        logging.basicConfig(
+            level=log_level,
+            format=log_format,
+            datefmt=log_datefmt,
+        )
+
+        # Add rotating file handler for VPS debugging
+        os.makedirs("logs", exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            "logs/xdm.log", maxBytes=10 * 1024 * 1024, backupCount=3,
+        )
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(logging.Formatter(log_format, datefmt=log_datefmt))
+        logging.getLogger().addHandler(file_handler)
 
         self.passcode = os.getenv("X_PASSCODE") or self.config["x.com"]["passcode"]
         if not (self.passcode.isdigit() and len(self.passcode) == 4):
@@ -110,28 +148,41 @@ class XAutomation:
         self.driver = self.chrome.driver()
         self.listener = DmListener(self.driver, self.config)
         self.opened_chat = OpenChat(self.driver, self.config)
+        self._failure_counts = {}  # conv_id -> consecutive failure count
+        self._max_failures = 3
+        self._start_time = time.time()
+        self._max_uptime = 6 * 3600  # restart Chrome every 6 hours
 
     def start(self):
         "Start the automation process"
         try:
-            self.driver.get(self.config["urls"]["base"])
-
-            self.login_manager = Login(self.driver, self.config)
-            self.login_manager.login()
-
-            self.driver.get(self.config["urls"]["chat"])
-            self.logger.debug("Navigated to: %s", self.config["urls"]["chat"])
-
-            # input("Press enter to continue")
-            self.enter_passcode()
-
+            self._login_and_navigate()
             self.main_loop()
 
         except KeyboardInterrupt:
             self.logger.warning("Keyboard interrupt received, exiting...")
 
         finally:
-            self.driver.close()
+            self.chrome.close()
+
+    def _login_and_navigate(self):
+        "Login to X.com and navigate to DM inbox"
+        self.driver.get(self.config["urls"]["base"])
+        self.login_manager = Login(self.driver, self.config)
+        self.login_manager.login()
+        self.driver.get(self.config["urls"]["chat"])
+        self.logger.debug("Navigated to: %s", self.config["urls"]["chat"])
+        self.enter_passcode()
+
+    def _reinitialize_driver(self):
+        "Tear down Chrome and rebuild everything for crash recovery"
+        self.logger.warning("Reinitializing Chrome driver...")
+        self.chrome.close()
+        time.sleep(5)
+        self.driver = self.chrome.driver()
+        self.listener = DmListener(self.driver, self.config)
+        self.opened_chat = OpenChat(self.driver, self.config)
+        self._login_and_navigate()
 
     def ensure_session(self):
         "Check if session is still active, re-login if expired"
@@ -218,6 +269,27 @@ class XAutomation:
         "Main loop to listen for DM changes and to read messages"
 
         while True:
+            # Periodic Chrome restart for memory management
+            if time.time() - self._start_time > self._max_uptime:
+                self.logger.info("Scheduled Chrome restart for memory management.")
+                try:
+                    self._reinitialize_driver()
+                    self._start_time = time.time()
+                except Exception as e:
+                    self.logger.error("Scheduled restart failed: %s", e)
+                    time.sleep(30)
+                    continue
+
+            # Check if Chrome is still alive; recover if not
+            if not self.chrome.is_alive():
+                self.logger.error("Chrome driver is dead, restarting...")
+                try:
+                    self._reinitialize_driver()
+                except Exception as e:
+                    self.logger.error("Failed to reinitialize driver: %s", e)
+                    time.sleep(30)
+                    continue
+
             new_message = self.listener.detect_new_message()
             if not new_message:
                 self.ensure_session()
@@ -226,14 +298,14 @@ class XAutomation:
 
             conv_id, change_type, data = new_message
             self.logger.info("[%s] %s → %s", change_type, conv_id, data["last_message"])
-            self.supabase.upsert_conversation(conv_id, data["username"])
 
-            original_tab = self.driver.window_handles[0]
             url = "https://x.com/i/chat/" + conv_id
             self.driver.execute_script(f"window.open('{url}', '_blank');")
             self.driver.switch_to.window(self.driver.window_handles[-1])
 
             try:
+                self.supabase.upsert_conversation(conv_id, data["username"])
+
                 if self.enter_passcode():
                     # website will redirect to chat page after passcode.
                     # so we need open the DM page again
@@ -254,28 +326,51 @@ class XAutomation:
                     self.listener.commit(conv_id)
                     continue
 
-                self.opened_chat.send_message(llm_response)
+                send_ok = self.opened_chat.send_message(llm_response)
+                if not send_ok:
+                    self.logger.warning("Send not verified for %s, saving messages only.", conv_id)
 
-                self.update_supabase(conv_id, new_chat, llm_response)
+                self.update_supabase(conv_id, new_chat, llm_response if send_ok else None)
                 self.listener.commit(conv_id)
+                self._failure_counts.pop(conv_id, None)
 
             except Exception as e:
                 self.logger.error(
                     "Error processing conversation %s: %s", conv_id, str(e)
                 )
+                self._failure_counts[conv_id] = (
+                    self._failure_counts.get(conv_id, 0) + 1
+                )
+                if self._failure_counts[conv_id] >= self._max_failures:
+                    self.logger.warning(
+                        "Conversation %s failed %d times, skipping.",
+                        conv_id, self._failure_counts[conv_id],
+                    )
+                    self.listener.commit(conv_id)
+                    self._failure_counts.pop(conv_id, None)
 
             finally:
                 time.sleep(2)
-                try:
-                    if len(self.driver.window_handles) > 1:
-                        self.driver.close()
-                        self.driver.switch_to.window(self.driver.window_handles[0])
-                    elif self.driver.current_url != self.config["urls"]["chat"]:
-                        self.driver.get(self.config["urls"]["chat"])
-                except WebDriverException:
-                    self.logger.error("Error cleaning up tab, navigating to inbox.")
-                    self.driver.get(self.config["urls"]["chat"])
-                time.sleep(self.config["x.com"]["polling_interval"])
+                self._cleanup_tabs()
+
+    def _cleanup_tabs(self):
+        "Close all tabs except the first and navigate back to DM inbox"
+        try:
+            handles = self.driver.window_handles
+            if len(handles) > 1:
+                for handle in handles[1:]:
+                    self.driver.switch_to.window(handle)
+                    self.driver.close()
+                self.driver.switch_to.window(handles[0])
+            if self.config["urls"]["chat"] not in self.driver.current_url:
+                self.driver.get(self.config["urls"]["chat"])
+        except WebDriverException:
+            self.logger.error("Error cleaning up tabs, navigating to inbox.")
+            try:
+                self.driver.get(self.config["urls"]["chat"])
+            except WebDriverException:
+                pass  # driver is dead, will be caught next loop iteration
+        time.sleep(self.config["x.com"]["polling_interval"])
 
     def update_supabase(self, conv_id, new_chat, llm_response):
         "update supabase with assistant response"
@@ -285,8 +380,10 @@ class XAutomation:
             )
             time.sleep(0.5)  # slight delay to ensure order
 
-        last_msg_id = self.opened_chat.get_last_message_id()
-        self.supabase.save_message(conv_id, last_msg_id, "assistant", llm_response)
+        if llm_response:
+            last_msg_id = self.opened_chat.get_last_message_id()
+            self.supabase.save_message(conv_id, last_msg_id, "assistant", llm_response)
+
         self.supabase.update_last_message_time(conv_id)
 
     def load_config(self, path="config.json"):
@@ -300,6 +397,57 @@ class XAutomation:
             return json.load(file)
 
 
+def _kill_orphaned_chrome(user_data_dir):
+    "Kill any leftover Chrome processes from a previous crash"
+    try:
+        subprocess.run(
+            ["pkill", "-f", f"chrome.*{user_data_dir}"],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass
+
+    lock_file = os.path.join(user_data_dir, "SingletonLock")
+    if os.path.exists(lock_file):
+        try:
+            os.remove(lock_file)
+        except OSError:
+            pass
+
+
+def run_forever():
+    "Run the bot with crash recovery and exponential backoff"
+    logger = logging.getLogger("RUNNER")
+    backoff = 30
+    max_backoff = 300
+
+    while True:
+        automation = None
+        try:
+            _kill_orphaned_chrome("chrome_profile")
+            automation = XAutomation()
+            backoff = 30  # reset on successful init
+            automation.start()
+            break  # clean exit (KeyboardInterrupt handled inside start)
+
+        except KeyboardInterrupt:
+            logger.warning("Keyboard interrupt, shutting down.")
+            break
+
+        except Exception:
+            logger.error("Fatal error:\n%s", traceback.format_exc())
+            logger.info("Restarting in %ds...", backoff)
+
+        finally:
+            if automation:
+                try:
+                    automation.chrome.close()
+                except Exception:
+                    pass
+
+        time.sleep(backoff)
+        backoff = min(backoff * 2, max_backoff)
+
+
 if __name__ == "__main__":
-    automation = XAutomation()
-    automation.start()
+    run_forever()

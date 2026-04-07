@@ -26,5 +26,8 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Logs
+logs/
+
 # Claude Code
 .claude/
