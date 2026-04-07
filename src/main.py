@@ -116,8 +116,8 @@ class XAutomation:
         try:
             self.driver.get(self.config["urls"]["base"])
 
-            login_manager = Login(self.driver, self.config)
-            login_manager.login()
+            self.login_manager = Login(self.driver, self.config)
+            self.login_manager.login()
 
             self.driver.get(self.config["urls"]["chat"])
             self.logger.debug("Navigated to: %s", self.config["urls"]["chat"])
@@ -132,6 +132,22 @@ class XAutomation:
 
         finally:
             self.driver.close()
+
+    def ensure_session(self):
+        "Check if session is still active, re-login if expired"
+        try:
+            login_button = self.driver.find_elements(
+                By.CSS_SELECTOR, "a[data-testid='loginButton']"
+            )
+            if login_button:
+                self.logger.warning("Session expired, re-authenticating...")
+                self.login_manager.login()
+                self.driver.get(self.config["urls"]["chat"])
+                self.enter_passcode()
+                return True
+        except WebDriverException as e:
+            self.logger.error("Error checking session: %s", str(e).splitlines()[0])
+        return False
 
     def enter_passcode(self):
         "Enter chat passcode if required to access chat"
@@ -204,6 +220,7 @@ class XAutomation:
         while True:
             new_message = self.listener.detect_new_message()
             if not new_message:
+                self.ensure_session()
                 time.sleep(self.config["x.com"]["polling_interval"])
                 continue
 
@@ -226,20 +243,38 @@ class XAutomation:
 
                 new_chat = self.opened_chat.read_messages(latest_msg_id)
                 if not new_chat:
+                    self.listener.commit(conv_id)
                     continue
 
                 chat_history = self.supabase.get_messages(conv_id)
 
                 llm_response = self.llm.get_response(new_chat, chat_history)
+                if not llm_response:
+                    self.logger.error("LLM returned empty response, skipping reply.")
+                    self.listener.commit(conv_id)
+                    continue
+
                 self.opened_chat.send_message(llm_response)
 
                 self.update_supabase(conv_id, new_chat, llm_response)
                 self.listener.commit(conv_id)
 
+            except Exception as e:
+                self.logger.error(
+                    "Error processing conversation %s: %s", conv_id, str(e)
+                )
+
             finally:
                 time.sleep(2)
-                self.driver.close()
-                self.driver.switch_to.window(original_tab)
+                try:
+                    if len(self.driver.window_handles) > 1:
+                        self.driver.close()
+                        self.driver.switch_to.window(self.driver.window_handles[0])
+                    elif self.driver.current_url != self.config["urls"]["chat"]:
+                        self.driver.get(self.config["urls"]["chat"])
+                except WebDriverException:
+                    self.logger.error("Error cleaning up tab, navigating to inbox.")
+                    self.driver.get(self.config["urls"]["chat"])
                 time.sleep(self.config["x.com"]["polling_interval"])
 
     def update_supabase(self, conv_id, new_chat, llm_response):

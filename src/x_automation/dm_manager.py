@@ -40,6 +40,13 @@ class DmListener:
             self.logger.info("Initial conversations loaded, marking as baseline.")
             self.prev_chats = copy.deepcopy(self.chats)
             self.first_run = False
+
+            # Process any unread messages that arrived while bot was offline
+            for conv_id, data in self.chats.items():
+                if data["unread"] and data["author"] != "assistant":
+                    self.logger.info("Unread message found from while offline: %s", conv_id)
+                    return conv_id, "new_message", data
+
             return None
 
         for conv_id, data in self.chats.items():

@@ -139,10 +139,11 @@ class SupaBase:
                 self.client.table(self.msgs_table)
                 .select("*")
                 .eq("conversation_id", conversation_id)
-                .order("created_at")
+                .order("created_at", desc=True)
                 .limit(self.limit)
                 .execute()
             )
+            res.data.reverse()  # restore chronological order
             self.logger.info("Fetched %s messages: %s", len(res.data), conversation_id)
             return res.data
 
