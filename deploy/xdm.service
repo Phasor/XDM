@@ -1,0 +1,25 @@
+[Unit]
+Description=XDM - X/Twitter DM Auto-Reply Bot
+After=network.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" __APP_DIR__/venv/bin/python src/main.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables (uncomment and fill in to use env vars instead of config.json)
+# Environment=X_USERNAME=your_username
+# Environment=X_PASSWORD=your_password
+# Environment=X_PASSCODE=1234
+# Environment=OPENROUTER_API_KEY=sk-or-v1-xxx
+# Environment=SUPABASE_URL=https://xxx.supabase.co
+# Environment=SUPABASE__SECRET_KEY=xxx
+# Environment=SUPABASE_DB_URL=postgresql://xxx
+
+[Install]
+WantedBy=multi-user.target
