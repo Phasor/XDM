@@ -162,15 +162,15 @@ class SupaBase:
             return None
 
     @_retry_on_network_error()
-    def get_messages(self, conversation_id):
-        """Fetch recent messages for a conversation"""
+    def get_messages(self, conversation_id, limit=None):
+        """Fetch messages for a conversation. Uses config limit by default."""
         try:
             res = (
                 self.client.table(self.msgs_table)
                 .select("*")
                 .eq("conversation_id", conversation_id)
                 .order("created_at", desc=True)
-                .limit(self.limit)
+                .limit(limit or self.limit)
                 .execute()
             )
             res.data.reverse()  # restore chronological order

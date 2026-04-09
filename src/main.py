@@ -309,11 +309,11 @@ class XAutomation:
                 if self.enter_passcode():
                     self.driver.get(url)
 
-                # 1. Get saved history from Supabase
-                chat_history = self.supabase.get_messages(conv_id)
+                # 1. Get ALL saved messages for hash comparison (high limit)
+                all_saved = self.supabase.get_messages(conv_id, limit=500)
 
                 # 2. Find new user messages by hash comparison
-                new_chat = self.opened_chat.read_messages(chat_history, conv_id)
+                new_chat = self.opened_chat.read_messages(all_saved, conv_id)
                 if not new_chat:
                     self.listener.commit(conv_id)
                     continue
@@ -325,7 +325,7 @@ class XAutomation:
                         normalize_text(msg["text"])
                     )
 
-                # 4. Re-fetch history (now includes new user messages)
+                # 4. Re-fetch recent history for LLM context (normal limit)
                 chat_history = self.supabase.get_messages(conv_id)
 
                 # 5. Get LLM response from Supabase history only (single source)

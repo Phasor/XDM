@@ -232,7 +232,13 @@ class OpenChat:
                 (By.CSS_SELECTOR, '[data-testid="dm-message-list"]')
             )
         )
-        time.sleep(5)  # Allow time for messages to fully load (extra for proxy latency)
+        time.sleep(3)
+
+        # Scroll to bottom to ensure latest messages are visible
+        self.driver.execute_script(
+            "arguments[0].scrollTop = arguments[0].scrollHeight", container
+        )
+        time.sleep(3)
 
         items = container.find_elements(By.CSS_SELECTOR, "ul > li")
         for li in items:
