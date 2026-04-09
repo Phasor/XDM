@@ -178,6 +178,16 @@ class OpenChat:
 
         self.logger.info("Extracted %d messages from chat.", len(full_chat))
 
+        # First conversation with empty Supabase: only take the last user message
+        if not saved_messages:
+            self.logger.info("No saved messages, taking only the last user message.")
+            for msg in reversed(full_chat):
+                if msg["author"] == "user":
+                    msg_hash = generate_message_id(conv_id, "user", msg["text"])
+                    msg["message_id"] = msg_hash
+                    return [msg]
+            return []
+
         # Build set of hashes for saved messages
         saved_hashes = set()
         occurrence_saved = {}
@@ -188,10 +198,6 @@ class OpenChat:
                 conv_id, msg["sender"], msg["message_text"], occurrence_saved[key]
             )
             saved_hashes.add(msg_hash)
-            if msg["sender"] == "user":
-                self.logger.info(
-                    "  Saved hash=%s text=%s", msg_hash[:8], msg["message_text"][:50]
-                )
 
         # Hash on-screen messages and find new ones
         new_user_messages = []
@@ -203,13 +209,7 @@ class OpenChat:
                 conv_id, msg["author"], msg["text"], occurrence_screen[key]
             )
 
-            is_new = msg_hash not in saved_hashes
-            if msg["author"] == "user":
-                self.logger.info(
-                    "  [%s] hash=%s new=%s text=%s",
-                    msg["author"], msg_hash[:8], is_new, msg["text"][:50]
-                )
-            if is_new and msg["author"] == "user":
+            if msg_hash not in saved_hashes and msg["author"] == "user":
                 msg["message_id"] = msg_hash
                 new_user_messages.append(msg)
 
