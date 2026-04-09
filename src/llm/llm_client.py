@@ -19,9 +19,9 @@ class LLM:
         with open(config["openrouter"]["personality_file"], "r", encoding="utf-8") as f:
             self.personality = f.read()
 
-    def get_response(self, new_chat, chat_history, max_retries=2):
+    def get_response(self, chat_history, max_retries=2):
         "Send messages to LLM and get response, with retry for transient errors"
-        messages = self.get_conversation_context(chat_history, new_chat)
+        messages = self.get_conversation_context(chat_history)
         for attempt in range(max_retries):
             try:
                 response = requests.post(
@@ -52,23 +52,14 @@ class LLM:
                 self.logger.error("LLM error: %s", e)
                 return None
 
-    def get_conversation_context(self, chat_history, new_chat):
-        """Return formatted conversation for LLM with merged user messages"""
-        llm_chat_history = [
-            {"role": msg["sender"], "content": msg["message_text"]}
-            for msg in chat_history
-        ]
-        llm_messages = [
-            {"role": msg["author"], "content": msg["text"]} for msg in new_chat
-        ]
-        messages = llm_chat_history + llm_messages
-
+    def get_conversation_context(self, chat_history):
+        """Build LLM context from Supabase history only (single source of truth)."""
         context = [{"role": "system", "content": self.personality}]
         buffer = {}
 
-        for m in messages:
-            role = m["role"]
-            text = m["content"]
+        for msg in chat_history:
+            role = msg["sender"]
+            text = msg["message_text"]
 
             if buffer and buffer["role"] == role:
                 buffer["content"] += "\n\n" + text
@@ -80,5 +71,5 @@ class LLM:
         if buffer:
             context.append(buffer)
 
-        self.logger.debug("Context built (merged)")
+        self.logger.debug("Context built from %d messages", len(chat_history))
         return context

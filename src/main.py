@@ -13,7 +13,7 @@ from seleniumbase import Driver
 
 from llm.llm_client import LLM
 from storage.supabase_client import SupaBase
-from x_automation.dm_manager import DmListener, OpenChat
+from x_automation.dm_manager import DmListener, OpenChat, normalize_text, generate_message_id
 from x_automation.login import Login
 
 
@@ -307,37 +307,43 @@ class XAutomation:
                 self.supabase.upsert_conversation(conv_id, data["username"])
 
                 if self.enter_passcode():
-                    # website will redirect to chat page after passcode.
-                    # so we need open the DM page again
                     self.driver.get(url)
 
+                # 1. Get saved history from Supabase
                 chat_history = self.supabase.get_messages(conv_id)
 
-                new_chat = self.opened_chat.read_messages(chat_history)
+                # 2. Find new user messages by hash comparison
+                new_chat = self.opened_chat.read_messages(chat_history, conv_id)
                 if not new_chat:
                     self.listener.commit(conv_id)
                     continue
 
-                # Save new user messages to Supabase immediately
+                # 3. Save new user messages to Supabase immediately
                 for msg in new_chat:
                     self.supabase.save_message(
-                        conv_id, msg["message_id"], msg["author"], msg["text"]
+                        conv_id, msg["message_id"], msg["author"],
+                        normalize_text(msg["text"])
                     )
 
-                # Re-fetch history now that new messages are saved
+                # 4. Re-fetch history (now includes new user messages)
                 chat_history = self.supabase.get_messages(conv_id)
 
-                llm_response = self.llm.get_response(new_chat, chat_history)
+                # 5. Get LLM response from Supabase history only (single source)
+                llm_response = self.llm.get_response(chat_history)
                 if not llm_response:
                     self.logger.error("LLM returned empty response, skipping reply.")
                     self.listener.commit(conv_id)
                     continue
 
-                send_ok = self.opened_chat.send_message(llm_response)
-                if not send_ok:
-                    self.logger.warning("Send not verified for %s, saving messages only.", conv_id)
+                # 6. Send reply
+                self.opened_chat.send_message(llm_response)
 
-                self.update_supabase(conv_id, new_chat, llm_response if send_ok else None)
+                # 7. Save assistant reply with deterministic hash
+                reply_hash = generate_message_id(conv_id, "assistant", llm_response)
+                self.supabase.save_message(
+                    conv_id, reply_hash, "assistant", normalize_text(llm_response)
+                )
+                self.supabase.update_last_message_time(conv_id)
                 self.listener.commit(conv_id)
                 self._failure_counts.pop(conv_id, None)
 
@@ -378,14 +384,6 @@ class XAutomation:
             except WebDriverException:
                 pass  # driver is dead, will be caught next loop iteration
         time.sleep(self.config["x.com"]["polling_interval"])
-
-    def update_supabase(self, conv_id, new_chat, llm_response):
-        "Save assistant response to supabase (user messages already saved)"
-        if llm_response:
-            last_msg_id = self.opened_chat.get_last_message_id()
-            self.supabase.save_message(conv_id, last_msg_id, "assistant", llm_response)
-
-        self.supabase.update_last_message_time(conv_id)
 
     def load_config(self, path="config.json"):
         "Load config file"

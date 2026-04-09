@@ -1,6 +1,9 @@
 import copy
+import hashlib
 import logging
+import re
 import time
+import unicodedata
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -9,6 +12,21 @@ from selenium.common.exceptions import (
     StaleElementReferenceException,
     WebDriverException,
 )
+
+
+def normalize_text(text):
+    "Canonical normalization for message text comparison and hashing."
+    text = unicodedata.normalize("NFC", text)
+    text = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
+    text = " ".join(text.split())
+    return text.strip()
+
+
+def generate_message_id(conv_id, sender, text, occurrence=1):
+    "Generate a deterministic message ID from content."
+    normalized = normalize_text(text)
+    raw = f"{conv_id}|{sender}|{normalized}|{occurrence}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 class DmListener:
@@ -145,11 +163,12 @@ class OpenChat:
         self.logger = logging.getLogger("CHAT")
         self.config = config
 
-    def read_messages(self, saved_messages):
-        """Read messages from page and return only new ones.
+    def read_messages(self, saved_messages, conv_id):
+        """Read messages from page and return only new user messages.
 
-        Args:
-            saved_messages: list of dicts from Supabase with 'message_text' and 'sender' keys
+        Uses content-addressed hashing to compare on-screen messages
+        against Supabase history. Returns new user messages with
+        deterministic message_id hashes attached.
         """
         try:
             full_chat = self.extract_messages()
@@ -159,37 +178,40 @@ class OpenChat:
 
         self.logger.info("Extracted %d messages from chat.", len(full_chat))
 
-        # Build set of saved message texts for fast lookup (normalize whitespace)
-        saved_texts = set()
+        # Build set of hashes for saved messages
+        saved_hashes = set()
+        occurrence_saved = {}
         for msg in saved_messages:
-            normalized = " ".join(msg["message_text"].split())
-            saved_texts.add((normalized, msg["sender"]))
+            key = (msg["sender"], normalize_text(msg["message_text"]))
+            occurrence_saved[key] = occurrence_saved.get(key, 0) + 1
+            msg_hash = generate_message_id(
+                conv_id, msg["sender"], msg["message_text"], occurrence_saved[key]
+            )
+            saved_hashes.add(msg_hash)
 
-        self.logger.info("Saved texts in Supabase: %d", len(saved_texts))
-
-        # Find messages on page that aren't in Supabase
-        new_messages = []
+        # Hash on-screen messages and find new ones
+        new_user_messages = []
+        occurrence_screen = {}
         for msg in full_chat:
-            normalized = " ".join(msg["text"].split())
-            key = (normalized, msg["author"])
-            if key not in saved_texts:
-                new_messages.append(msg)
+            key = (msg["author"], normalize_text(msg["text"]))
+            occurrence_screen[key] = occurrence_screen.get(key, 0) + 1
+            msg_hash = generate_message_id(
+                conv_id, msg["author"], msg["text"], occurrence_screen[key]
+            )
 
-        if not new_messages:
-            self.logger.warning("No new messages found in conversation.")
-            return []
+            if msg_hash not in saved_hashes and msg["author"] == "user":
+                msg["message_id"] = msg_hash
+                new_user_messages.append(msg)
 
-        # Filter to only new user messages (ignore old assistant messages from screen)
-        new_user_messages = [m for m in new_messages if m["author"] == "user"]
         if not new_user_messages:
-            self.logger.warning("No new user messages found, only assistant messages.")
+            self.logger.info("No new user messages found.")
             return []
 
         self.logger.info("Found %d new user messages.", len(new_user_messages))
         return new_user_messages
 
     def extract_messages(self):
-        "Extract messages from opened chat"
+        "Extract messages from opened chat (text and author only)."
         results = []
 
         container = WebDriverWait(self.driver, 10).until(
@@ -198,7 +220,6 @@ class OpenChat:
             )
         )
         time.sleep(3)  # Allow time for messages to fully load
-        # input("Press enter after DM messages are fully loaded.")
 
         items = container.find_elements(By.CSS_SELECTOR, "ul > li")
         for li in items:
@@ -210,42 +231,33 @@ class OpenChat:
                 continue
 
             try:
-                # --- detect author and message ID ---
                 classes = msg_box.get_attribute("class")
-                message_id = msg_box.get_attribute("data-testid")
 
                 if "justify-end" in classes:
                     author = "assistant"
                 elif "justify-start" in classes:
                     author = "user"
                 else:
-                    self.logger.warning("Unknown message format, skipping.")
                     continue
 
-                # --- extract text ---
                 try:
                     text_elem = msg_box.find_element(
                         By.CSS_SELECTOR,
                         '[data-testid^="message-text-"] span[dir="auto"]',
                     )
                 except NoSuchElementException:
-                    self.logger.warning("Message type is not supported, skipping.")
                     continue
 
                 text = text_elem.get_attribute("innerText").strip()
-
                 if text:
-                    results.append(
-                        {"message_id": message_id, "author": author, "text": text}
-                    )
+                    results.append({"author": author, "text": text})
             except StaleElementReferenceException:
-                self.logger.debug("Stale element during message extraction, skipping.")
                 continue
 
         return results
 
     def send_message(self, text):
-        "Send message to opened chat. Returns True if send was verified."
+        "Send message to opened chat."
         try:
             textarea = self.driver.find_element(
                 By.CSS_SELECTOR, '[data-testid="dm-composer-textarea"]'
@@ -259,24 +271,10 @@ class OpenChat:
                 By.CSS_SELECTOR, '[data-testid="dm-composer-send-button"]'
             ).click()
 
-            # Verify the message appeared
             time.sleep(2)
-            messages = self.extract_messages()
-            if messages and messages[-1]["author"] == "assistant":
-                self.logger.info("Message sent and verified.")
-                return True
-
-            self.logger.warning("Message send could not be verified.")
-            return False
+            self.logger.info("Message sent.")
+            return True
 
         except NoSuchElementException as e:
             self.logger.error("Failed to send message, element not found: %s", str(e))
             return False
-
-    def get_last_message_id(self):
-        "Get message ID of the last message in the opened chat"
-        time.sleep(1)
-        messages = self.extract_messages()
-        if messages:
-            return messages[-1]["message_id"]
-        return None

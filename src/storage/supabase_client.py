@@ -181,38 +181,6 @@ class SupaBase:
             self.logger.error("Failed to fetch messages: %s", e)
             return []
 
-    @_retry_on_network_error()
-    def get_latest_message(self, conversation_id: str):
-        """Return latest message for a conversation as dict with id, text, sender"""
-        try:
-            res = (
-                self.client.table(self.msgs_table)
-                .select("message_id,message_text,sender")
-                .eq("conversation_id", conversation_id)
-                .order("created_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-        except (APIError, HTTPError) as e:
-            self.logger.error("Failed to fetch latest message: %s", e)
-            return None
-
-        if res.data:
-            return res.data[0]
-        return None
-
-    @_retry_on_network_error()
-    def get_latest_message_id(self, conversation_id: str):
-        """Return latest message_id for a conversation"""
-        msg = self.get_latest_message(conversation_id)
-        if msg:
-            msg_id = msg["message_id"]
-        else:
-            msg_id = None
-
-        self.logger.debug("Latest user message ID: %s", msg_id)
-        return msg_id
-
     # =========================
     # Utility
     # =========================
