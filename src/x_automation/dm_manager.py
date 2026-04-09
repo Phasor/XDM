@@ -183,6 +183,18 @@ class OpenChat:
 
             new_messages.reverse()
             full_chat = new_messages
+        else:
+            # No saved messages — first time seeing this conversation.
+            # Only take the last user message to avoid dumping entire history.
+            self.logger.info("No saved messages, taking only the last user message.")
+            last_user_msgs = []
+            for msg in reversed(full_chat):
+                if msg["author"] == "user":
+                    last_user_msgs.insert(0, msg)
+                    break
+                elif msg["author"] == "assistant":
+                    break  # stop if we hit an assistant message
+            full_chat = last_user_msgs
 
         if not full_chat:
             self.logger.warning("No new user message found in conversation.")
