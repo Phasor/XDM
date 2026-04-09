@@ -170,15 +170,30 @@ class OpenChat:
             # If ID not found, match by text from the last saved message
             if not found and latest_msg_text:
                 self.logger.info("ID not found, matching by text: %s", latest_msg_text[:50])
+                saved_text = latest_msg_text.strip()
                 new_messages = []
                 for msg in full_chat:
-                    if msg["text"] == latest_msg_text and msg["author"] == latest_msg_author:
+                    page_text = msg["text"].strip()
+                    same_author = msg["author"] == latest_msg_author
+                    # Match: exact, starts-with, or contains (handles truncation)
+                    text_match = (
+                        page_text == saved_text
+                        or saved_text.startswith(page_text[:30])
+                        or page_text.startswith(saved_text[:30])
+                    )
+                    if text_match and same_author:
                         found = True
+                        self.logger.info("Matched by text: %s", page_text[:50])
                         break
                     new_messages.append(msg)
 
             if not found:
                 self.logger.warning("Could not find last saved message on page.")
+                # Log what's on screen vs saved for debugging
+                for msg in full_chat:
+                    self.logger.info(
+                        "  On page [%s]: %s", msg["author"], msg["text"][:60]
+                    )
                 new_messages = []
 
             new_messages.reverse()
