@@ -292,6 +292,17 @@ class XAutomation:
 
             new_message = self.listener.detect_new_message()
             if not new_message:
+                # Check if passcode screen is blocking the DM inbox
+                try:
+                    passcode_prompt = self.driver.find_elements(
+                        By.XPATH,
+                        '//div[@data-testid="pin-title" and text()="Enter Passcode"]',
+                    )
+                    if passcode_prompt:
+                        self.logger.info("Passcode prompt detected, re-entering.")
+                        self.enter_passcode()
+                except WebDriverException:
+                    pass
                 self.ensure_session()
                 time.sleep(self.config["x.com"]["polling_interval"])
                 continue
