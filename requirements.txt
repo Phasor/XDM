@@ -65,12 +65,12 @@ pytest-rerunfailures==16.1
 pytest-xdist==3.8.0
 python-dateutil==2.9.0.post0
 PyYAML==6.0.3
-realtime==2.28.3
+realtime>=2.28.3
 requests==2.33.1
 rich==14.3.3
 sbvirtualdisplay==1.4.0
 selenium==4.41.0
-seleniumbase==4.47.9
+seleniumbase>=4.47.9
 setuptools==82.0.1
 six==1.17.0
 sniffio==1.3.1
@@ -79,9 +79,9 @@ soupsieve==2.8.3
 storage3==2.28.3
 StrEnum==0.4.15
 strictyaml==1.7.3
-supabase==2.28.3
-supabase-auth==2.28.3
-supabase-functions==2.28.3
+supabase>=2.28.3
+supabase-auth>=2.28.3
+supabase-functions>=2.28.3
 tabcompleter==1.4.0
 tenacity==9.1.4
 trio==0.33.0
