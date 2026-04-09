@@ -153,17 +153,29 @@ class OpenChat:
             self.logger.error("Error extracting messages: %s", str(e).splitlines()[0])
             return []
 
+        self.logger.info("Extracted %d messages from chat.", len(full_chat))
+
         if latest_msg_id:
+            self.logger.info("Looking for latest saved msg: %s", latest_msg_id)
             new_messages = []
+            found = False
             full_chat.reverse()
 
             for msg in full_chat:
                 if msg["message_id"] == latest_msg_id:
+                    found = True
                     break  # stop here, don't include matched message
                 new_messages.append(msg)
 
+            if not found:
+                self.logger.warning(
+                    "Latest saved message ID not found on page, treating all as new."
+                )
+                new_messages = list(reversed(full_chat))
+            else:
+                new_messages.reverse()
+
             full_chat = new_messages
-            full_chat.reverse()
 
         if not full_chat:
             self.logger.warning("No new user message found in conversation.")
