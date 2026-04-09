@@ -145,7 +145,7 @@ class OpenChat:
         self.logger = logging.getLogger("CHAT")
         self.config = config
 
-    def read_messages(self, latest_msg_id):
+    def read_messages(self, latest_msg_id, latest_msg_text=None, latest_msg_author=None):
         "Open chat and read messages"
         try:
             full_chat = self.extract_messages()
@@ -156,25 +156,32 @@ class OpenChat:
         self.logger.info("Extracted %d messages from chat.", len(full_chat))
 
         if latest_msg_id:
-            self.logger.info("Looking for latest saved msg: %s", latest_msg_id)
             new_messages = []
             found = False
             full_chat.reverse()
 
-            for msg in full_chat:
+            # Try matching by message ID first
+            for i, msg in enumerate(full_chat):
                 if msg["message_id"] == latest_msg_id:
                     found = True
-                    break  # stop here, don't include matched message
+                    break
                 new_messages.append(msg)
 
-            if not found:
-                self.logger.warning(
-                    "Latest saved message ID not found on page, treating all as new."
-                )
-                new_messages = list(reversed(full_chat))
-            else:
-                new_messages.reverse()
+            # If ID not found, match by text from the last saved message
+            if not found and latest_msg_text:
+                self.logger.info("ID not found, matching by text: %s", latest_msg_text[:50])
+                new_messages = []
+                for msg in full_chat:
+                    if msg["text"] == latest_msg_text and msg["author"] == latest_msg_author:
+                        found = True
+                        break
+                    new_messages.append(msg)
 
+            if not found:
+                self.logger.warning("Could not find last saved message on page.")
+                new_messages = []
+
+            new_messages.reverse()
             full_chat = new_messages
 
         if not full_chat:

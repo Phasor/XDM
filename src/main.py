@@ -311,9 +311,14 @@ class XAutomation:
                     # so we need open the DM page again
                     self.driver.get(url)
 
-                latest_msg_id = self.supabase.get_latest_message_id(conv_id)
+                latest_msg = self.supabase.get_latest_message(conv_id)
+                latest_msg_id = latest_msg["message_id"] if latest_msg else None
+                latest_msg_text = latest_msg["message_text"] if latest_msg else None
+                latest_msg_author = latest_msg["sender"] if latest_msg else None
 
-                new_chat = self.opened_chat.read_messages(latest_msg_id)
+                new_chat = self.opened_chat.read_messages(
+                    latest_msg_id, latest_msg_text, latest_msg_author
+                )
                 if not new_chat:
                     self.listener.commit(conv_id)
                     continue
