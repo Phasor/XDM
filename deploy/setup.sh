@@ -5,11 +5,13 @@
 set -e
 
 APP_USER="${1:-ben}"
+BRANCH="${2:-master}"
 APP_DIR="/home/$APP_USER/xdm"
 REPO_URL="https://github.com/Phasor/XDM.git"
 
 echo "=== XDM Bot Setup for Ubuntu 24.04 ==="
 echo "App user: $APP_USER"
+echo "Branch:   $BRANCH"
 echo "App directory: $APP_DIR"
 echo ""
 
@@ -40,9 +42,11 @@ echo "[3/6] Setting up application..."
 if [ -d "$APP_DIR" ]; then
     echo "Directory exists, pulling latest..."
     cd "$APP_DIR"
-    sudo -u "$APP_USER" git pull
+    sudo -u "$APP_USER" git fetch --all
+    sudo -u "$APP_USER" git checkout "$BRANCH"
+    sudo -u "$APP_USER" git pull origin "$BRANCH"
 else
-    sudo -u "$APP_USER" git clone "$REPO_URL" "$APP_DIR"
+    sudo -u "$APP_USER" git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
     cd "$APP_DIR"
 fi
 
