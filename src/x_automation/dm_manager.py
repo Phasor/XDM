@@ -159,32 +159,34 @@ class OpenChat:
 
         self.logger.info("Extracted %d messages from chat.", len(full_chat))
 
-        # Build set of saved message texts for fast lookup
+        # Build set of saved message texts for fast lookup (normalize whitespace)
         saved_texts = set()
         for msg in saved_messages:
-            saved_texts.add((msg["message_text"].strip(), msg["sender"]))
+            normalized = " ".join(msg["message_text"].split())
+            saved_texts.add((normalized, msg["sender"]))
+
+        self.logger.info("Saved texts in Supabase: %d", len(saved_texts))
 
         # Find messages on page that aren't in Supabase
         new_messages = []
         for msg in full_chat:
-            key = (msg["text"].strip(), msg["author"])
+            normalized = " ".join(msg["text"].split())
+            key = (normalized, msg["author"])
             if key not in saved_texts:
                 new_messages.append(msg)
 
         if not new_messages:
-            self.logger.warning("No new user message found in conversation.")
+            self.logger.warning("No new messages found in conversation.")
             return []
 
-        self.logger.info("Found %d new messages.", len(new_messages))
-
-        last_msg = new_messages[-1]
-        if last_msg["author"] == "assistant":
-            self.logger.warning(
-                "Last message is from assistant, skipping conversation: %s"
-            )
+        # Filter to only new user messages (ignore old assistant messages from screen)
+        new_user_messages = [m for m in new_messages if m["author"] == "user"]
+        if not new_user_messages:
+            self.logger.warning("No new user messages found, only assistant messages.")
             return []
 
-        return full_chat
+        self.logger.info("Found %d new user messages.", len(new_user_messages))
+        return new_user_messages
 
     def extract_messages(self):
         "Extract messages from opened chat"
