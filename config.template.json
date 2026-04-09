@@ -2,7 +2,7 @@
     "logging_level": "INFO",
     "chrome": {
         "headless": false,
-        "proxy": "",
+        "proxy": "http://user:pass@proxy-host:port",
         "undetected_chromedirver": true,
         "width_height": [780, 820],
         "window_position": [755, 0],
