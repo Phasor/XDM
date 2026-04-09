@@ -27,26 +27,23 @@ class Login:
 
     def login(self):
         "Login to X.com with provided credentials, using cookies if available"
+        # Try cookie restore first (before checking login_required)
+        cookie_file = f"cookies/{self.username}.json"
+        if os.path.exists(cookie_file):
+            self.logger.info("Cookie file found for @%s, restoring session.", self.username)
+            self.load_cookies()
+            if not self.login_required():
+                self.logger.info("Session restored from cookies.")
+                self.save_cookies()
+                return
+            self.logger.warning("Cookie restore failed, session expired.")
+
         if not self.login_required():
             self.save_cookies()
-            self.logger.info("Cookies saved for account: @%s", self.username)
+            self.logger.info("Already logged in for account: @%s", self.username)
             return
 
         self.logger.info("Account is not logged in, Attempting login.")
-
-        if SAVE_COOKIES and os.path.exists(f"cookies/{self.username}.json"):
-            self.logger.info(
-                "Cookies file already exist for account @%s, Restoring session.",
-                self.username,
-            )
-            self.load_cookies()
-
-            if not self.login_required():
-                self.logger.info("Session restored successfully.")
-                return
-            self.logger.warning(
-                "Couldn't restore session from cookies file, Attempting new login."
-            )
 
         self.enter_username()
         self.logger.info("Entered username: %s", self.username)
@@ -136,31 +133,18 @@ class Login:
         ).click()
 
     def load_cookies(self):
-        "Load cookies from json file"
+        "Load cookies from json file and reload page"
         with open(f"cookies/{self.username}.json", "r", encoding="utf-8") as f:
             cookies = json.load(f)
 
-        # remove auth token item from cookies
-        cookies = [item for item in cookies if not "token" in item]
-
         for cookie in cookies:
-            self.driver.add_cookie(cookie)
+            try:
+                self.driver.add_cookie(cookie)
+            except Exception:
+                pass  # skip cookies that don't match current domain
 
-        current_tab = self.driver.current_window_handle
-
-        base_url = self.config["urls"]["base"]
-        self.driver.execute_script(f"window.open('{base_url}', '_blank');")
-
-        # Switch to new tab
-        new_tab = [tab for tab in self.driver.window_handles if tab != current_tab][0]
-        self.driver.switch_to.window(new_tab)
-
-        # Close old tab
-        self.driver.switch_to.window(current_tab)
-        self.driver.close()
-
-        # Focus on new tab
-        self.driver.switch_to.window(new_tab)
+        self.driver.get(self.config["urls"]["base"])
+        time.sleep(5)
 
     def save_cookies(self):
         "Save cookies in a json file"
