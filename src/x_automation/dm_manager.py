@@ -181,10 +181,13 @@ class OpenChat:
         # First conversation with empty Supabase: only take the last user message
         if not saved_messages:
             self.logger.info("No saved messages, taking only the last user message.")
+            for msg in full_chat:
+                self.logger.info("  On screen [%s]: %s", msg["author"], msg["text"][:60])
             for msg in reversed(full_chat):
                 if msg["author"] == "user":
                     msg_hash = generate_message_id(conv_id, "user", msg["text"])
                     msg["message_id"] = msg_hash
+                    self.logger.info("Selected: %s", msg["text"][:60])
                     return [msg]
             return []
 
@@ -229,7 +232,7 @@ class OpenChat:
                 (By.CSS_SELECTOR, '[data-testid="dm-message-list"]')
             )
         )
-        time.sleep(3)  # Allow time for messages to fully load
+        time.sleep(5)  # Allow time for messages to fully load (extra for proxy latency)
 
         items = container.find_elements(By.CSS_SELECTOR, "ul > li")
         for li in items:
