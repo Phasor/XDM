@@ -145,8 +145,12 @@ class OpenChat:
         self.logger = logging.getLogger("CHAT")
         self.config = config
 
-    def read_messages(self, latest_msg_id, latest_msg_text=None, latest_msg_author=None):
-        "Open chat and read messages"
+    def read_messages(self, saved_messages):
+        """Read messages from page and return only new ones.
+
+        Args:
+            saved_messages: list of dicts from Supabase with 'message_text' and 'sender' keys
+        """
         try:
             full_chat = self.extract_messages()
         except WebDriverException as e:
@@ -155,67 +159,25 @@ class OpenChat:
 
         self.logger.info("Extracted %d messages from chat.", len(full_chat))
 
-        if latest_msg_id:
-            new_messages = []
-            found = False
-            full_chat.reverse()
+        # Build set of saved message texts for fast lookup
+        saved_texts = set()
+        for msg in saved_messages:
+            saved_texts.add((msg["message_text"].strip(), msg["sender"]))
 
-            # Try matching by message ID first
-            for i, msg in enumerate(full_chat):
-                if msg["message_id"] == latest_msg_id:
-                    found = True
-                    break
+        # Find messages on page that aren't in Supabase
+        new_messages = []
+        for msg in full_chat:
+            key = (msg["text"].strip(), msg["author"])
+            if key not in saved_texts:
                 new_messages.append(msg)
 
-            # If ID not found, match by text from the last saved message
-            if not found and latest_msg_text:
-                self.logger.info("ID not found, matching by text: %s", latest_msg_text[:50])
-                saved_text = latest_msg_text.strip()
-                new_messages = []
-                for msg in full_chat:
-                    page_text = msg["text"].strip()
-                    same_author = msg["author"] == latest_msg_author
-                    # Match: exact, starts-with, or contains (handles truncation)
-                    text_match = (
-                        page_text == saved_text
-                        or saved_text.startswith(page_text[:30])
-                        or page_text.startswith(saved_text[:30])
-                    )
-                    if text_match and same_author:
-                        found = True
-                        self.logger.info("Matched by text: %s", page_text[:50])
-                        break
-                    new_messages.append(msg)
-
-            if not found:
-                self.logger.warning("Could not find last saved message on page.")
-                # Log what's on screen vs saved for debugging
-                for msg in full_chat:
-                    self.logger.info(
-                        "  On page [%s]: %s", msg["author"], msg["text"][:60]
-                    )
-                new_messages = []
-
-            new_messages.reverse()
-            full_chat = new_messages
-        else:
-            # No saved messages — first time seeing this conversation.
-            # Only take the last user message to avoid dumping entire history.
-            self.logger.info("No saved messages, taking only the last user message.")
-            last_user_msgs = []
-            for msg in reversed(full_chat):
-                if msg["author"] == "user":
-                    last_user_msgs.insert(0, msg)
-                    break
-                elif msg["author"] == "assistant":
-                    break  # stop if we hit an assistant message
-            full_chat = last_user_msgs
-
-        if not full_chat:
+        if not new_messages:
             self.logger.warning("No new user message found in conversation.")
             return []
 
-        last_msg = full_chat[-1]
+        self.logger.info("Found %d new messages.", len(new_messages))
+
+        last_msg = new_messages[-1]
         if last_msg["author"] == "assistant":
             self.logger.warning(
                 "Last message is from assistant, skipping conversation: %s"

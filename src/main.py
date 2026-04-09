@@ -311,18 +311,20 @@ class XAutomation:
                     # so we need open the DM page again
                     self.driver.get(url)
 
-                latest_msg = self.supabase.get_latest_message(conv_id)
-                latest_msg_id = latest_msg["message_id"] if latest_msg else None
-                latest_msg_text = latest_msg["message_text"] if latest_msg else None
-                latest_msg_author = latest_msg["sender"] if latest_msg else None
+                chat_history = self.supabase.get_messages(conv_id)
 
-                new_chat = self.opened_chat.read_messages(
-                    latest_msg_id, latest_msg_text, latest_msg_author
-                )
+                new_chat = self.opened_chat.read_messages(chat_history)
                 if not new_chat:
                     self.listener.commit(conv_id)
                     continue
 
+                # Save new user messages to Supabase immediately
+                for msg in new_chat:
+                    self.supabase.save_message(
+                        conv_id, msg["message_id"], msg["author"], msg["text"]
+                    )
+
+                # Re-fetch history now that new messages are saved
                 chat_history = self.supabase.get_messages(conv_id)
 
                 llm_response = self.llm.get_response(new_chat, chat_history)
@@ -378,13 +380,7 @@ class XAutomation:
         time.sleep(self.config["x.com"]["polling_interval"])
 
     def update_supabase(self, conv_id, new_chat, llm_response):
-        "update supabase with assistant response"
-        for msg in new_chat:
-            self.supabase.save_message(
-                conv_id, msg["message_id"], msg["author"], msg["text"]
-            )
-            time.sleep(0.5)  # slight delay to ensure order
-
+        "Save assistant response to supabase (user messages already saved)"
         if llm_response:
             last_msg_id = self.opened_chat.get_last_message_id()
             self.supabase.save_message(conv_id, last_msg_id, "assistant", llm_response)
