@@ -10,8 +10,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
 
-# Set to True to save cookies after login, which can speed up subsequent logins
-SAVE_COOKIES = False
+# Always try cookie restore and save cookies after successful login
+SAVE_COOKIES = True
 
 
 class Login:
