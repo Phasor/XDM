@@ -3,6 +3,7 @@ import logging
 import logging.handlers
 import os
 import subprocess
+import threading
 import time
 import traceback
 from selenium.common import WebDriverException
@@ -12,7 +13,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from seleniumbase import Driver
 
 from llm.llm_client import LLM
-from notifications.telegram_handler import TelegramHandler
+from notifications.telegram_handler import Notifier, TelegramHandler
 from storage.supabase_client import SupaBase
 from x_automation.dm_manager import DmListener, OpenChat, normalize_text, generate_message_id
 from x_automation.login import Login
@@ -118,7 +119,7 @@ class XAutomation:
 
     def __init__(self):
         self.config = self.load_config()
-        _setup_logging(self.config)
+        self.notifier = _setup_logging(self.config)
 
         self.passcode = os.getenv("X_PASSCODE") or self.config["x.com"]["passcode"]
         if not (self.passcode.isdigit() and len(self.passcode) == 4):
@@ -136,17 +137,81 @@ class XAutomation:
         self._start_time = time.time()
         self._max_uptime = 6 * 3600  # restart Chrome every 6 hours
 
+        # Heartbeat watchdog state. Updated each main_loop iteration; a
+        # background thread alerts via Telegram if it goes stale.
+        self._heartbeat_at = time.time()
+        self._heartbeat_stale_secs = 300  # 5 min
+        self._heartbeat_check_secs = 60
+        self._shutdown = threading.Event()
+        self._heartbeat_thread = None
+
     def start(self):
         "Start the automation process"
         try:
             self._login_and_navigate()
+
+            # Bot is logged in and ready. Notify and start the watchdog thread
+            # before entering the main loop.
+            self._notify_event(
+                f"\u2705 XDM started: @{self.config['x.com']['username']}",
+                dedup_key="bot_started",
+            )
+            self._start_heartbeat_thread()
+
             self.main_loop()
 
         except KeyboardInterrupt:
             self.logger.warning("Keyboard interrupt received, exiting...")
 
         finally:
+            self._stop_heartbeat_thread()
             self.chrome.close()
+
+    def _notify_event(self, text, dedup_key=None):
+        "Send a Telegram event notification (no-op if Telegram not configured)."
+        if self.notifier:
+            self.notifier.notify(text, dedup_key=dedup_key)
+
+    def _start_heartbeat_thread(self):
+        "Background watchdog that alerts on a stalled main loop."
+        self._shutdown.clear()
+        self._heartbeat_at = time.time()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_watchdog, daemon=True, name="heartbeat-watchdog",
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_heartbeat_thread(self):
+        self._shutdown.set()
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=5)
+        self._heartbeat_thread = None
+
+    def _heartbeat_watchdog(self):
+        """
+        Runs in a background thread. Alerts via Telegram if main_loop stops
+        updating self._heartbeat_at for longer than _heartbeat_stale_secs.
+        Sends a "recovered" alert when the heartbeat resumes.
+        """
+        alerted = False
+        while not self._shutdown.is_set():
+            stale_for = time.time() - self._heartbeat_at
+            if stale_for > self._heartbeat_stale_secs:
+                if not alerted:
+                    self._notify_event(
+                        f"\u26a0\ufe0f XDM heartbeat lost \u2014 main loop stalled "
+                        f"for {int(stale_for)}s",
+                        dedup_key="heartbeat_lost",
+                    )
+                    alerted = True
+            else:
+                if alerted:
+                    self._notify_event(
+                        "\u2705 XDM heartbeat recovered",
+                        dedup_key="heartbeat_recovered",
+                    )
+                    alerted = False
+            self._shutdown.wait(self._heartbeat_check_secs)
 
     def _login_and_navigate(self):
         "Login to X.com and navigate to DM inbox"
@@ -252,6 +317,9 @@ class XAutomation:
         "Main loop to listen for DM changes and to read messages"
 
         while True:
+            # Update heartbeat so the watchdog thread knows the loop is alive.
+            self._heartbeat_at = time.time()
+
             # Periodic Chrome restart for memory management
             if time.time() - self._start_time > self._max_uptime:
                 self.logger.info("Scheduled Chrome restart for memory management.")
@@ -391,10 +459,14 @@ class XAutomation:
 
 
 def _setup_logging(config):
-    "Configure root logging once. Idempotent across run_forever() retries."
+    """
+    Configure root logging once. Idempotent across run_forever() retries.
+    Returns the Notifier (or None if Telegram is not configured) so callers
+    can send direct event notifications outside the logging path.
+    """
     root = logging.getLogger()
     if getattr(root, "_xdm_configured", False):
-        return
+        return getattr(root, "_xdm_notifier", None)
 
     log_level = logging.INFO if config["logging_level"] == "INFO" else logging.DEBUG
     log_format = "%(asctime)s | %(process)d | %(name)s | %(levelname)s | %(message)s"
@@ -411,19 +483,24 @@ def _setup_logging(config):
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
 
-    # Telegram alerts on ERROR/CRITICAL. Token/chat_id from config or env
-    # (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID). Missing config = no-op.
+    # Telegram alerts on ERROR/CRITICAL plus direct event notifications.
+    # Token/chat_id from config or env (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).
+    # Missing config = no-op (notifier is None, handler not attached).
+    notifier = None
     tg_cfg = config.get("telegram", {})
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN") or tg_cfg.get("bot_token", "")
     tg_chat = os.getenv("TELEGRAM_CHAT_ID") or tg_cfg.get("chat_id", "")
     if tg_token and tg_chat:
-        tg_handler = TelegramHandler(tg_token, tg_chat, level=logging.ERROR)
+        notifier = Notifier(tg_token, tg_chat)
+        tg_handler = TelegramHandler(notifier, level=logging.ERROR)
         tg_handler.setFormatter(
             logging.Formatter("[XDM %(levelname)s] %(name)s\n%(message)s")
         )
         root.addHandler(tg_handler)
 
     root._xdm_configured = True
+    root._xdm_notifier = notifier
+    return notifier
 
 
 def _kill_orphaned_chrome(user_data_dir):
