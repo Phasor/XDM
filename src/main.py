@@ -412,9 +412,15 @@ def _kill_orphaned_chrome(user_data_dir):
     # pkill (run as non-root) only kills the bot user's own processes, so a
     # broad pattern is safe on a single-purpose VPS. "chrome" as a substring
     # also catches chromedriver and chrome_crashpad_handler.
+    #
+    # IMPORTANT: do NOT kill Xvfb here. Under systemd we run as a child of
+    # `xvfb-run`, so the Xvfb instance providing our display is a sibling
+    # process owned by the bot user. Killing it strands Chrome without a
+    # display and causes a crash loop. systemd's KillMode=control-group
+    # handles Xvfb cleanup across restarts at the cgroup level.
     try:
         subprocess.run(
-            ["pkill", "-9", "-f", r"chrome|uc_driver|Xvfb"],
+            ["pkill", "-9", "-f", r"chrome|uc_driver"],
             capture_output=True, timeout=5,
         )
     except Exception:
