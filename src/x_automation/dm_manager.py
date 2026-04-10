@@ -14,6 +14,18 @@ from selenium.common.exceptions import (
 )
 
 
+# Number of previous messages mixed into each message's content hash. Disambiguates
+# duplicate text by surrounding context: identical text in different conversation
+# positions produces different hashes. Collisions only occur if WINDOW+1 consecutive
+# (sender, text) pairs are byte-identical — vanishingly rare in DM traffic.
+WINDOW = 10
+
+# ASCII Unit Separator: cannot appear in normalized text (whitespace is collapsed,
+# zero-width chars are stripped, but \x1f is preserved). Used as a field delimiter
+# inside the hash input so that field boundaries can't be ambiguous.
+SEPARATOR = "\x1f"
+
+
 def normalize_text(text):
     "Canonical normalization for message text comparison and hashing."
     text = unicodedata.normalize("NFC", text)
@@ -22,10 +34,18 @@ def normalize_text(text):
     return text.strip()
 
 
-def generate_message_id(conv_id, sender, text, occurrence=1):
-    "Generate a deterministic message ID from content."
-    normalized = normalize_text(text)
-    raw = f"{conv_id}|{sender}|{normalized}|{occurrence}"
+def generate_message_id(conv_id, sender, text, prev_texts):
+    """Context-windowed content hash for a message.
+
+    `prev_texts` is the list of up to WINDOW immediately preceding message texts
+    (oldest first). Empty list is valid for the very first message in a conversation
+    or for the offline-gap fallback path. The hash is deterministic, so re-saving
+    the same logical message yields the same ID and the upsert is idempotent.
+    """
+    parts = [conv_id, sender, normalize_text(text)] + [
+        normalize_text(t) for t in prev_texts
+    ]
+    raw = SEPARATOR.join(parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -166,62 +186,111 @@ class OpenChat:
     def read_messages(self, saved_messages, conv_id):
         """Read messages from page and return only new user messages.
 
-        Uses content-addressed hashing to compare on-screen messages
-        against Supabase history. Returns new user messages with
-        deterministic message_id hashes attached.
+        Aligns the on-screen window against the saved tail by anchoring on the
+        last saved (sender, text) tuple, then computes context-windowed hashes
+        for any messages past the alignment point. See plan in
+        plans/merry-riding-scone.md for the full algorithm.
         """
         try:
-            full_chat = self.extract_messages()
+            screen = self.extract_messages()
         except WebDriverException as e:
             self.logger.error("Error extracting messages: %s", str(e).splitlines()[0])
             return []
 
-        self.logger.info("Extracted %d messages from chat.", len(full_chat))
-
-        # First conversation with empty Supabase: only take the last user message
-        if not saved_messages:
-            self.logger.info("No saved messages, taking only the last user message.")
-            for msg in full_chat:
-                self.logger.info("  On screen [%s]: %s", msg["author"], msg["text"][:60])
-            for msg in reversed(full_chat):
-                if msg["author"] == "user":
-                    msg_hash = generate_message_id(conv_id, "user", msg["text"])
-                    msg["message_id"] = msg_hash
-                    self.logger.info("Selected: %s", msg["text"][:60])
-                    return [msg]
+        if not screen:
             return []
 
-        # Build set of hashes for saved messages
-        saved_hashes = set()
-        occurrence_saved = {}
-        for msg in saved_messages:
-            key = (msg["sender"], normalize_text(msg["message_text"]))
-            occurrence_saved[key] = occurrence_saved.get(key, 0) + 1
-            msg_hash = generate_message_id(
-                conv_id, msg["sender"], msg["message_text"], occurrence_saved[key]
+        if not saved_messages:
+            self.logger.info(
+                "No saved messages (n_screen=%d), first-run fallback.", len(screen)
             )
-            saved_hashes.add(msg_hash)
+            return self._first_run_last_user(screen, conv_id)
 
-        # Hash on-screen messages and find new ones
+        saved_keys = [
+            (m["sender"], normalize_text(m["message_text"])) for m in saved_messages
+        ]
+        screen_keys = [
+            (m["author"], normalize_text(m["text"])) for m in screen
+        ]
+
+        # Anchor-based alignment: find positions in screen matching the last saved
+        # tuple, then verify backward. Picks the longest valid overlap. Handles the
+        # case where the on-screen window starts mid-conversation OR begins with an
+        # assistant interjection just after the last saved user message.
+        last_saved = saved_keys[-1]
+        overlap = 0
+        for p in range(len(screen_keys)):
+            if screen_keys[p] != last_saved:
+                continue
+            k = p + 1
+            if k > len(saved_keys):
+                continue
+            if saved_keys[-k:] == screen_keys[:k]:
+                if k > overlap:
+                    overlap = k
+
+        self.logger.info(
+            "Alignment: n_saved=%d n_screen=%d overlap=%d",
+            len(saved_keys), len(screen_keys), overlap,
+        )
+
+        if overlap == 0:
+            self.logger.warning(
+                "No alignment between saved tail and on-screen — possible "
+                "message gap. Falling back to last user message only."
+            )
+            return self._first_run_last_user(screen, conv_id)
+
+        # Unified conversation = saved tail + new on-screen tail (oldest first).
+        # New messages live at unified[len(saved_keys):]; their prev context is
+        # drawn from earlier positions in unified, which may span both saved
+        # rows and just-detected on-screen messages.
+        unified = saved_keys + screen_keys[overlap:]
         new_user_messages = []
-        occurrence_screen = {}
-        for msg in full_chat:
-            key = (msg["author"], normalize_text(msg["text"]))
-            occurrence_screen[key] = occurrence_screen.get(key, 0) + 1
-            msg_hash = generate_message_id(
-                conv_id, msg["author"], msg["text"], occurrence_screen[key]
+        for i in range(len(saved_keys), len(unified)):
+            sender, _ = unified[i]
+            if sender != "user":
+                continue
+            prev_texts = [t for _, t in unified[max(0, i - WINDOW):i]]
+            screen_idx = overlap + (i - len(saved_keys))
+            original = screen[screen_idx]
+            msg_id = generate_message_id(
+                conv_id, "user", original["text"], prev_texts
             )
-
-            if msg_hash not in saved_hashes and msg["author"] == "user":
-                msg["message_id"] = msg_hash
-                new_user_messages.append(msg)
+            new_user_messages.append(
+                {
+                    "author": "user",
+                    "text": original["text"],
+                    "message_id": msg_id,
+                }
+            )
 
         if not new_user_messages:
             self.logger.info("No new user messages found.")
-            return []
-
-        self.logger.info("Found %d new user messages.", len(new_user_messages))
+        else:
+            self.logger.info("Found %d new user messages.", len(new_user_messages))
         return new_user_messages
+
+    def _first_run_last_user(self, screen, conv_id):
+        """Return only the most recent user message from the on-screen list.
+
+        Used both for the empty-Supabase first run AND as the offline-gap
+        fallback when alignment fails. Hashes with empty prev context — that
+        asymmetry is fine because subsequent polls identify this message via
+        the (sender, text) tuple in alignment, not by re-computing its hash.
+        """
+        for msg in reversed(screen):
+            if msg["author"] == "user":
+                msg_id = generate_message_id(conv_id, "user", msg["text"], [])
+                self.logger.info("First-run/fallback selected: %s", msg["text"][:60])
+                return [
+                    {
+                        "author": "user",
+                        "text": msg["text"],
+                        "message_id": msg_id,
+                    }
+                ]
+        return []
 
     def extract_messages(self):
         "Extract messages from opened chat (text and author only)."

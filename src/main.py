@@ -15,7 +15,13 @@ from seleniumbase import Driver
 from llm.llm_client import LLM
 from notifications.telegram_handler import Notifier, TelegramHandler
 from storage.supabase_client import SupaBase
-from x_automation.dm_manager import DmListener, OpenChat, normalize_text, generate_message_id
+from x_automation.dm_manager import (
+    DmListener,
+    OpenChat,
+    WINDOW,
+    generate_message_id,
+    normalize_text,
+)
 from x_automation.login import Login
 
 
@@ -371,10 +377,11 @@ class XAutomation:
                 if self.enter_passcode():
                     self.driver.get(url)
 
-                # 1. Get ALL saved messages for hash comparison (high limit)
-                all_saved = self.supabase.get_messages(conv_id, limit=500)
+                # 1. Fetch a bounded saved tail for alignment. 100 covers the
+                # ~17-msg on-screen window plus a comfortable offline-gap margin.
+                all_saved = self.supabase.get_messages(conv_id, limit=100)
 
-                # 2. Find new user messages by hash comparison
+                # 2. Find new user messages via context-windowed hashing.
                 new_chat = self.opened_chat.read_messages(all_saved, conv_id)
                 if not new_chat:
                     self.listener.commit(conv_id)
@@ -387,7 +394,9 @@ class XAutomation:
                         normalize_text(msg["text"])
                     )
 
-                # 4. Re-fetch recent history for LLM context (normal limit)
+                # 4. Re-fetch recent history for LLM context (normal limit).
+                # This now includes the just-saved user messages, so it's also
+                # the right source for the assistant reply's prev context.
                 chat_history = self.supabase.get_messages(conv_id)
 
                 # 5. Get LLM response from Supabase history only (single source)
@@ -400,8 +409,14 @@ class XAutomation:
                 # 6. Send reply
                 self.opened_chat.send_message(llm_response)
 
-                # 7. Save assistant reply with deterministic hash
-                reply_hash = generate_message_id(conv_id, "assistant", llm_response)
+                # 7. Save assistant reply with context-windowed hash. Reuse
+                # chat_history's tail as prev context — no extra DB round-trip.
+                reply_prev = [
+                    normalize_text(m["message_text"]) for m in chat_history[-WINDOW:]
+                ]
+                reply_hash = generate_message_id(
+                    conv_id, "assistant", llm_response, reply_prev
+                )
                 self.supabase.save_message(
                     conv_id, reply_hash, "assistant", normalize_text(llm_response)
                 )
