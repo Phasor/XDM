@@ -16,8 +16,11 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=xdm
 
-# Clean shutdown: SIGTERM to main process, SIGKILL to Chrome children after timeout
-KillMode=mixed
+# Clean shutdown: SIGTERM to entire cgroup (Python + Chrome subtree), then
+# SIGKILL the whole cgroup after timeout. This is the default mode but stated
+# explicitly — `mixed` only signals the main PID and leaves Chrome children
+# orphaned in the cgroup, which causes "left-over process" warnings on restart.
+KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=30
 

@@ -408,10 +408,13 @@ class XAutomation:
 
 
 def _kill_orphaned_chrome(user_data_dir):
-    "Kill any leftover Chrome processes from a previous crash"
+    "Kill any leftover browser processes from a previous crash"
+    # pkill (run as non-root) only kills the bot user's own processes, so a
+    # broad pattern is safe on a single-purpose VPS. "chrome" as a substring
+    # also catches chromedriver and chrome_crashpad_handler.
     try:
         subprocess.run(
-            ["pkill", "-f", f"chrome.*{user_data_dir}"],
+            ["pkill", "-9", "-f", r"chrome|uc_driver|Xvfb"],
             capture_output=True, timeout=5,
         )
     except Exception:
