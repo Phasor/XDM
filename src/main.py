@@ -12,6 +12,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from seleniumbase import Driver
 
 from llm.llm_client import LLM
+from notifications.telegram_handler import TelegramHandler
 from storage.supabase_client import SupaBase
 from x_automation.dm_manager import DmListener, OpenChat, normalize_text, generate_message_id
 from x_automation.login import Login
@@ -49,6 +50,10 @@ CONFIG_TEMPLATE = {
         "personality_file": "prompts/personality.txt",
     },
     "urls": {"base": "https://x.com/", "chat": "https://x.com/i/chat"},
+    "telegram": {
+        "bot_token": "",
+        "chat_id": "",
+    },
 }
 
 
@@ -113,29 +118,7 @@ class XAutomation:
 
     def __init__(self):
         self.config = self.load_config()
-
-        log_level = (
-            logging.INFO
-            if self.config["logging_level"] == "INFO"
-            else logging.DEBUG
-        )
-        log_format = "%(asctime)s | %(process)d | %(name)s | %(levelname)s | %(message)s"
-        log_datefmt = "%Y-%m-%d %H:%M:%S"
-
-        logging.basicConfig(
-            level=log_level,
-            format=log_format,
-            datefmt=log_datefmt,
-        )
-
-        # Add rotating file handler for VPS debugging
-        os.makedirs("logs", exist_ok=True)
-        file_handler = logging.handlers.RotatingFileHandler(
-            "logs/xdm.log", maxBytes=10 * 1024 * 1024, backupCount=3,
-        )
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(logging.Formatter(log_format, datefmt=log_datefmt))
-        logging.getLogger().addHandler(file_handler)
+        _setup_logging(self.config)
 
         self.passcode = os.getenv("X_PASSCODE") or self.config["x.com"]["passcode"]
         if not (self.passcode.isdigit() and len(self.passcode) == 4):
@@ -405,6 +388,42 @@ class XAutomation:
 
         with open(path, "r", encoding="utf-8") as file:
             return json.load(file)
+
+
+def _setup_logging(config):
+    "Configure root logging once. Idempotent across run_forever() retries."
+    root = logging.getLogger()
+    if getattr(root, "_xdm_configured", False):
+        return
+
+    log_level = logging.INFO if config["logging_level"] == "INFO" else logging.DEBUG
+    log_format = "%(asctime)s | %(process)d | %(name)s | %(levelname)s | %(message)s"
+    log_datefmt = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(log_format, datefmt=log_datefmt)
+
+    logging.basicConfig(level=log_level, format=log_format, datefmt=log_datefmt)
+
+    os.makedirs("logs", exist_ok=True)
+    file_handler = logging.handlers.RotatingFileHandler(
+        "logs/xdm.log", maxBytes=10 * 1024 * 1024, backupCount=3,
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    # Telegram alerts on ERROR/CRITICAL. Token/chat_id from config or env
+    # (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID). Missing config = no-op.
+    tg_cfg = config.get("telegram", {})
+    tg_token = os.getenv("TELEGRAM_BOT_TOKEN") or tg_cfg.get("bot_token", "")
+    tg_chat = os.getenv("TELEGRAM_CHAT_ID") or tg_cfg.get("chat_id", "")
+    if tg_token and tg_chat:
+        tg_handler = TelegramHandler(tg_token, tg_chat, level=logging.ERROR)
+        tg_handler.setFormatter(
+            logging.Formatter("[XDM %(levelname)s] %(name)s\n%(message)s")
+        )
+        root.addHandler(tg_handler)
+
+    root._xdm_configured = True
 
 
 def _kill_orphaned_chrome(user_data_dir):

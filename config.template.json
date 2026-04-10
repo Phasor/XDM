@@ -32,5 +32,9 @@
     "urls": {
         "base": "https://x.com/",
         "chat": "https://x.com/i/chat"
+    },
+    "telegram": {
+        "bot_token": "",
+        "chat_id": ""
     }
 }
