@@ -383,11 +383,35 @@ class XAutomation:
 
                 # 2. Find new user messages via context-windowed hashing.
                 new_chat = self.opened_chat.read_messages(all_saved, conv_id)
-                if not new_chat:
+
+                # Detect an orphaned user message: no new user messages detected,
+                # but the tail of saved history is a user msg with no assistant
+                # follow-up. This happens when a prior poll saved the user message
+                # but the reply path failed (LLM error, network blip, crash, etc).
+                # Retry the reply path without re-saving.
+                orphaned_retry = (
+                    not new_chat
+                    and all_saved
+                    and all_saved[-1]["sender"] == "user"
+                )
+
+                if not new_chat and not orphaned_retry:
                     self.listener.commit(conv_id)
                     continue
 
-                # 3. Save new user messages to Supabase immediately
+                if orphaned_retry:
+                    self.logger.warning(
+                        "Orphaned user message detected for %s, retrying reply.",
+                        conv_id,
+                    )
+                    self._notify_event(
+                        "\u26a0\ufe0f XDM retrying orphaned user message "
+                        f"(@{data['username']})",
+                        dedup_key=f"orphan_retry_{conv_id}",
+                    )
+
+                # 3. Save new user messages to Supabase immediately. No-op on the
+                # orphaned-retry path (new_chat is empty there).
                 for msg in new_chat:
                     self.supabase.save_message(
                         conv_id, msg["message_id"], msg["author"],
