@@ -235,9 +235,27 @@ class OpenChat:
         )
 
         if overlap == 0:
+            # Dump enough state to diagnose the mismatch next time we see this.
+            # last_saved tells us the anchor we tried to find; its presence or
+            # absence in screen_keys tells us whether it's a "last saved msg
+            # isn't rendered" vs "it's there but the prefix doesn't match".
+            anchor_positions = [
+                i for i, k in enumerate(screen_keys) if k == last_saved
+            ]
             self.logger.warning(
                 "No alignment between saved tail and on-screen — possible "
                 "message gap. Falling back to last user message only."
+            )
+            self.logger.warning(
+                "Alignment diag: last_saved=%r anchor_positions_in_screen=%s",
+                last_saved, anchor_positions,
+            )
+            self.logger.warning(
+                "Alignment diag: saved_keys tail (last 5): %r",
+                saved_keys[-5:],
+            )
+            self.logger.warning(
+                "Alignment diag: screen_keys full: %r", screen_keys,
             )
             return self._first_run_last_user(screen, conv_id)
 
