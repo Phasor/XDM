@@ -213,38 +213,48 @@ class OpenChat:
             (m["author"], normalize_text(m["text"])) for m in screen
         ]
 
-        # Anchor-based alignment: find positions in screen matching the last saved
-        # tuple, then verify backward. Picks the longest valid overlap. Handles the
-        # case where the on-screen window starts mid-conversation OR begins with an
-        # assistant interjection just after the last saved user message.
+        # Flexible suffix alignment: find the longest contiguous range of
+        # screen_keys ending at some position that matches a suffix of
+        # saved_keys. Unlike strict prefix alignment, this doesn't require the
+        # match to start at screen[0] — so it tolerates gaps in the saved
+        # history (e.g., a prior fallback that saved only one message out of
+        # a burst) without cascading into permanent alignment failure.
         last_saved = saved_keys[-1]
         overlap = 0
+        anchor_end = -1
         for p in range(len(screen_keys)):
             if screen_keys[p] != last_saved:
                 continue
-            k = p + 1
-            if k > len(saved_keys):
-                continue
-            if saved_keys[-k:] == screen_keys[:k]:
-                if k > overlap:
-                    overlap = k
+            # Walk backward counting matches against saved's tail.
+            k = 0
+            while (
+                p - k >= 0
+                and len(saved_keys) - 1 - k >= 0
+                and screen_keys[p - k] == saved_keys[-(k + 1)]
+            ):
+                k += 1
+            # Prefer longer overlap; tie-break on later anchor position
+            # (the more recent occurrence is the correct alignment point).
+            if k > overlap or (k == overlap and p > anchor_end):
+                overlap = k
+                anchor_end = p
 
         self.logger.info(
-            "Alignment: n_saved=%d n_screen=%d overlap=%d",
-            len(saved_keys), len(screen_keys), overlap,
+            "Alignment: n_saved=%d n_screen=%d overlap=%d anchor_end=%d",
+            len(saved_keys), len(screen_keys), overlap, anchor_end,
         )
 
         if overlap == 0:
             # Dump enough state to diagnose the mismatch next time we see this.
             # last_saved tells us the anchor we tried to find; its presence or
             # absence in screen_keys tells us whether it's a "last saved msg
-            # isn't rendered" vs "it's there but the prefix doesn't match".
+            # isn't rendered" vs "it's there but no contiguous overlap exists".
             anchor_positions = [
                 i for i, k in enumerate(screen_keys) if k == last_saved
             ]
             self.logger.warning(
                 "No alignment between saved tail and on-screen — possible "
-                "message gap. Falling back to last user message only."
+                "message gap. Falling back to trailing user burst."
             )
             self.logger.warning(
                 "Alignment diag: last_saved=%r anchor_positions_in_screen=%s",
@@ -257,20 +267,22 @@ class OpenChat:
             self.logger.warning(
                 "Alignment diag: screen_keys full: %r", screen_keys,
             )
-            return self._first_run_last_user(screen, conv_id)
+            return self._trailing_user_burst(
+                screen, screen_keys, saved_keys, conv_id
+            )
 
-        # Unified conversation = saved tail + new on-screen tail (oldest first).
+        # Unified conversation = saved + new on-screen tail (oldest first).
         # New messages live at unified[len(saved_keys):]; their prev context is
         # drawn from earlier positions in unified, which may span both saved
         # rows and just-detected on-screen messages.
-        unified = saved_keys + screen_keys[overlap:]
+        unified = saved_keys + screen_keys[anchor_end + 1:]
         new_user_messages = []
         for i in range(len(saved_keys), len(unified)):
             sender, _ = unified[i]
             if sender != "user":
                 continue
             prev_texts = [t for _, t in unified[max(0, i - WINDOW):i]]
-            screen_idx = overlap + (i - len(saved_keys))
+            screen_idx = (anchor_end + 1) + (i - len(saved_keys))
             original = screen[screen_idx]
             msg_id = generate_message_id(
                 conv_id, "user", original["text"], prev_texts
@@ -292,15 +304,14 @@ class OpenChat:
     def _first_run_last_user(self, screen, conv_id):
         """Return only the most recent user message from the on-screen list.
 
-        Used both for the empty-Supabase first run AND as the offline-gap
-        fallback when alignment fails. Hashes with empty prev context — that
-        asymmetry is fine because subsequent polls identify this message via
-        the (sender, text) tuple in alignment, not by re-computing its hash.
+        Used for the empty-Supabase first run. Hashes with empty prev context
+        — the asymmetry is fine because subsequent polls identify this message
+        via the (sender, text) tuple in alignment, not by re-computing its hash.
         """
         for msg in reversed(screen):
             if msg["author"] == "user":
                 msg_id = generate_message_id(conv_id, "user", msg["text"], [])
-                self.logger.info("First-run/fallback selected: %s", msg["text"][:60])
+                self.logger.info("First-run selected: %s", msg["text"][:60])
                 return [
                     {
                         "author": "user",
@@ -309,6 +320,47 @@ class OpenChat:
                     }
                 ]
         return []
+
+    def _trailing_user_burst(self, screen, screen_keys, saved_keys, conv_id):
+        """Return all user messages in screen after the last assistant msg,
+        excluding any that are already in saved by (sender, text) tuple.
+
+        Used as the alignment-fallback path. Captures a rapid burst of user
+        messages even when alignment fails entirely — prior behavior saved
+        only the last user msg which turned isolated alignment failures into
+        permanent saved-history gaps.
+        """
+        last_assistant = -1
+        for i in range(len(screen_keys) - 1, -1, -1):
+            if screen_keys[i][0] == "assistant":
+                last_assistant = i
+                break
+
+        saved_set = set(saved_keys) if saved_keys else set()
+        new_msgs = []
+        for i in range(last_assistant + 1, len(screen_keys)):
+            if screen_keys[i][0] != "user":
+                continue
+            if screen_keys[i] in saved_set:
+                continue
+            prev_texts = [t for _, t in screen_keys[max(0, i - WINDOW):i]]
+            original = screen[i]
+            msg_id = generate_message_id(
+                conv_id, "user", original["text"], prev_texts
+            )
+            new_msgs.append(
+                {
+                    "author": "user",
+                    "text": original["text"],
+                    "message_id": msg_id,
+                }
+            )
+
+        self.logger.info(
+            "Trailing user burst: saving %d user msgs after screen[%d].",
+            len(new_msgs), last_assistant,
+        )
+        return new_msgs
 
     def extract_messages(self):
         "Extract messages from opened chat (text and author only)."
