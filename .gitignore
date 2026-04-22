@@ -10,6 +10,9 @@ cookies/
 # Downloaded files
 downloaded_files/
 
+# Generated tweet images
+generated_images/
+
 # Config with credentials (use env vars or create locally)
 config.json
 

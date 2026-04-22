@@ -20,6 +20,7 @@
         "db_url": "",
         "conversations_table": "conversations",
         "messages_table": "messages",
+        "drafts_table": "drafts",
         "context_message_limit": 20
     },
     "openrouter": {
@@ -28,6 +29,30 @@
         "endpoint": "https://openrouter.ai/api/v1/chat/completions",
         "timeout": 30,
         "personality_file": "prompts/personality.txt"
+    },
+    "tweeting": {
+        "enabled": false,
+        "require_approval": true,
+        "character_name": "default",
+        "character_file": "prompts/character.txt",
+        "context_recent_posts": 20,
+        "draft_expiry_hours": 4,
+        "schedule_enabled": false,
+        "timezone": "UTC",
+        "windows": [
+            "08:00-10:30",
+            "12:30-14:30",
+            "18:00-20:00",
+            "21:30-23:00"
+        ],
+        "posts_per_day_target": 4,
+        "min_gap_minutes": 60
+    },
+    "fal_ai": {
+        "api_key": "",
+        "model": "fal-ai/nano-banana",
+        "timeout_seconds": 120,
+        "image_dir": "generated_images"
     },
     "urls": {
         "base": "https://x.com/",

@@ -2,10 +2,12 @@ import json
 import logging
 import logging.handlers
 import os
+import queue
 import subprocess
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 from selenium.common import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -13,8 +15,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from seleniumbase import Driver
 
 from llm.llm_client import LLM
+from notifications.telegram_bot import TelegramBot
 from notifications.telegram_handler import Notifier, TelegramHandler
 from storage.supabase_client import SupaBase
+from tweeting.approval import ApprovalFlow
+from tweeting.composer import TweetComposer
+from tweeting.image_gen import ImageGenerator
+from tweeting.poster import TweetPoster
+from tweeting.scheduler import TweetScheduler
 from x_automation.dm_manager import (
     DmListener,
     OpenChat,
@@ -47,6 +55,7 @@ CONFIG_TEMPLATE = {
         "db_url": "",
         "conversations_table": "conversations",
         "messages_table": "messages",
+        "drafts_table": "drafts",
         "context_message_limit": 20,
     },
     "openrouter": {
@@ -55,6 +64,30 @@ CONFIG_TEMPLATE = {
         "endpoint": "https://openrouter.ai/api/v1/chat/completions",
         "timeout": 30,
         "personality_file": "prompts/personality.txt",
+    },
+    "tweeting": {
+        "enabled": False,
+        "require_approval": True,
+        "character_name": "default",
+        "character_file": "prompts/character.txt",
+        "context_recent_posts": 20,
+        "draft_expiry_hours": 4,
+        "schedule_enabled": False,
+        "timezone": "UTC",
+        "windows": [
+            "08:00-10:30",
+            "12:30-14:30",
+            "18:00-20:00",
+            "21:30-23:00",
+        ],
+        "posts_per_day_target": 4,
+        "min_gap_minutes": 60,
+    },
+    "fal_ai": {
+        "api_key": "",
+        "model": "fal-ai/nano-banana",
+        "timeout_seconds": 120,
+        "image_dir": "generated_images",
     },
     "urls": {"base": "https://x.com/", "chat": "https://x.com/i/chat"},
     "telegram": {
@@ -151,6 +184,32 @@ class XAutomation:
         self._shutdown = threading.Event()
         self._heartbeat_thread = None
 
+        # Tweeting pipeline (disabled by default; gated on config flag).
+        self.tweeting_enabled = bool(self.config.get("tweeting", {}).get("enabled"))
+        self.tweet_poster = None
+        self.approval = None
+        self.tg_bot = None
+        self.scheduler = None
+        self.compose_queue = queue.Queue()
+        self._draft_failures = {}  # draft_id -> consecutive post failure count
+        if self.tweeting_enabled:
+            self._setup_tweeting()
+
+    def _setup_tweeting(self):
+        "Instantiate the tweeting components (composer, image-gen, poster, approval, scheduler, TG bot)."
+        composer = TweetComposer(self.config)
+        image_gen = ImageGenerator(self.config)
+        self.tweet_poster = TweetPoster(self.driver, self.config)
+        self.tg_bot = TelegramBot(self.config, self.supabase, self.compose_queue)
+        self.approval = ApprovalFlow(
+            self.config, self.supabase, composer, image_gen, self.tg_bot,
+        )
+        self.scheduler = TweetScheduler(self.config, self.supabase)
+        self.logger.info(
+            "Tweeting pipeline initialized (schedule_enabled=%s)",
+            self.scheduler.enabled,
+        )
+
     def start(self):
         "Start the automation process"
         try:
@@ -163,6 +222,8 @@ class XAutomation:
                 dedup_key="bot_started",
             )
             self._start_heartbeat_thread()
+            if self.tg_bot:
+                self.tg_bot.start()
 
             self.main_loop()
 
@@ -170,6 +231,8 @@ class XAutomation:
             self.logger.warning("Keyboard interrupt received, exiting...")
 
         finally:
+            if self.tg_bot:
+                self.tg_bot.stop()
             self._stop_heartbeat_thread()
             self.chrome.close()
 
@@ -236,6 +299,8 @@ class XAutomation:
         self.driver = self.chrome.driver()
         self.listener = DmListener(self.driver, self.config)
         self.opened_chat = OpenChat(self.driver, self.config)
+        if self.tweeting_enabled:
+            self.tweet_poster = TweetPoster(self.driver, self.config)
         self._login_and_navigate()
 
     def ensure_session(self):
@@ -346,6 +411,12 @@ class XAutomation:
                     self.logger.error("Failed to reinitialize driver: %s", e)
                     time.sleep(30)
                     continue
+
+            # Tweeting pipeline ticks (no-ops if tweeting disabled).
+            if self.tweeting_enabled:
+                self._tick_expire_drafts()
+                self._tick_generate_draft()
+                self._tick_post_approved()
 
             new_message = self.listener.detect_new_message()
             if not new_message:
@@ -467,6 +538,77 @@ class XAutomation:
                 time.sleep(2)
                 self._cleanup_tabs()
 
+    # =========================
+    # Tweeting lifecycle ticks
+    # =========================
+
+    def _tick_expire_drafts(self):
+        try:
+            self.approval.expire_pending()
+        except Exception as e:
+            self.logger.error("expire_pending tick failed: %s", e)
+
+    def _tick_generate_draft(self):
+        "Enqueue a scheduled slot if due, then drain any pending compose requests."
+        try:
+            if self.scheduler and self.scheduler.should_fire():
+                self.compose_queue.put({"type": "new", "source": "schedule"})
+        except Exception as e:
+            self.logger.error("scheduler tick failed: %s", e)
+
+        while True:
+            try:
+                req = self.compose_queue.get_nowait()
+            except queue.Empty:
+                return
+
+            try:
+                if req["type"] == "regen":
+                    self.approval.regenerate(req["replace_draft_id"])
+                else:
+                    self.approval.create_new_draft()
+            except Exception as e:
+                self.logger.error("compose request failed: %s", e)
+
+    def _tick_post_approved(self):
+        "Post any approved drafts whose scheduled_for has arrived."
+        try:
+            due = self.supabase.get_approved_due()
+        except Exception as e:
+            self.logger.error("get_approved_due failed: %s", e)
+            return
+
+        for draft in due:
+            draft_id = draft["draft_id"]
+            try:
+                tweet_url = self.tweet_poster.post(
+                    draft["text"], image_path=draft.get("image_path"),
+                )
+                self.supabase.update_draft(draft_id, {
+                    "status": "posted",
+                    "posted_at": _now_iso(),
+                    "tweet_url": tweet_url,
+                })
+                self.approval.confirm_posted(draft_id, tweet_url)
+                self._draft_failures.pop(draft_id, None)
+
+            except Exception as e:
+                self._draft_failures[draft_id] = (
+                    self._draft_failures.get(draft_id, 0) + 1
+                )
+                self.logger.error(
+                    "Failed to post draft %s (attempt %d): %s",
+                    draft_id, self._draft_failures[draft_id], e,
+                )
+                if self._draft_failures[draft_id] >= self._max_failures:
+                    reason = str(e).splitlines()[0][:200]
+                    self.supabase.update_draft(draft_id, {
+                        "status": "failed",
+                        "failure_reason": reason,
+                    })
+                    self.approval.report_failure(draft_id, reason)
+                    self._draft_failures.pop(draft_id, None)
+
     def _cleanup_tabs(self):
         "Close all tabs except the first and navigate back to DM inbox"
         try:
@@ -495,6 +637,11 @@ class XAutomation:
 
         with open(path, "r", encoding="utf-8") as file:
             return json.load(file)
+
+
+def _now_iso():
+    "UTC ISO-8601 timestamp for Supabase timestamptz columns."
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _setup_logging(config):

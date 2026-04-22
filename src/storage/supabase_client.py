@@ -40,6 +40,7 @@ class SupaBase:
 
         self.conv_table = config["supabase"]["conversations_table"]
         self.msgs_table = config["supabase"]["messages_table"]
+        self.drafts_table = config["supabase"].get("drafts_table", "drafts")
         self.limit = config["supabase"]["context_message_limit"]
 
         url = os.getenv("SUPABASE_URL") or config["supabase"]["project_url"]
@@ -78,6 +79,32 @@ class SupaBase:
 
         CREATE INDEX IF NOT EXISTS idx_messages_conversation
         ON {self.msgs_table}(conversation_id);
+
+        CREATE TABLE IF NOT EXISTS {self.drafts_table} (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            draft_id text UNIQUE NOT NULL,
+            character_name text NOT NULL,
+            text text NOT NULL,
+            image_prompt text,
+            image_path text,
+            status text NOT NULL CHECK (status IN
+                ('pending','approved','rejected','expired','posted','failed')),
+            telegram_chat_id text,
+            telegram_message_id text,
+            scheduled_for timestamptz,
+            expires_at timestamptz,
+            posted_at timestamptz,
+            tweet_url text,
+            failure_reason text,
+            created_at timestamptz DEFAULT now(),
+            updated_at timestamptz DEFAULT now()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_drafts_status
+        ON {self.drafts_table}(status);
+
+        CREATE INDEX IF NOT EXISTS idx_drafts_expires
+        ON {self.drafts_table}(expires_at) WHERE status='pending';
         """
 
         try:
@@ -179,6 +206,146 @@ class SupaBase:
 
         except (APIError, HTTPError) as e:
             self.logger.error("Failed to fetch messages: %s", e)
+            return []
+
+    # =========================
+    # Drafts (outbound tweets)
+    # =========================
+
+    @_retry_on_network_error()
+    def insert_draft(self, draft):
+        "Insert a new draft row. `draft` is a dict matching the drafts schema."
+        try:
+            res = (
+                self.client.table(self.drafts_table)
+                .insert(draft)
+                .execute()
+            )
+            self.logger.info("Draft inserted: %s", draft.get("draft_id"))
+            return res.data[0] if res.data else None
+        except (APIError, HTTPError) as e:
+            self.logger.error("Failed to insert draft: %s", e)
+            return None
+
+    @_retry_on_network_error()
+    def update_draft(self, draft_id, fields):
+        "Update arbitrary fields on a draft. Always bumps updated_at."
+        fields = dict(fields)
+        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            res = (
+                self.client.table(self.drafts_table)
+                .update(fields)
+                .eq("draft_id", draft_id)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+        except (APIError, HTTPError) as e:
+            self.logger.error("Failed to update draft %s: %s", draft_id, e)
+            return None
+
+    @_retry_on_network_error()
+    def get_draft(self, draft_id):
+        "Fetch a single draft by draft_id."
+        try:
+            res = (
+                self.client.table(self.drafts_table)
+                .select("*")
+                .eq("draft_id", draft_id)
+                .limit(1)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+        except (APIError, HTTPError) as e:
+            self.logger.error("Failed to fetch draft %s: %s", draft_id, e)
+            return None
+
+    @_retry_on_network_error()
+    def get_draft_by_telegram(self, chat_id, message_id):
+        "Find the draft attached to a given Telegram message (for reply-edits)."
+        try:
+            res = (
+                self.client.table(self.drafts_table)
+                .select("*")
+                .eq("telegram_chat_id", str(chat_id))
+                .eq("telegram_message_id", str(message_id))
+                .limit(1)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+        except (APIError, HTTPError) as e:
+            self.logger.error("Failed to fetch draft by TG msg: %s", e)
+            return None
+
+    @_retry_on_network_error()
+    def get_pending_expired(self):
+        "Return pending drafts whose expires_at has passed."
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            res = (
+                self.client.table(self.drafts_table)
+                .select("*")
+                .eq("status", "pending")
+                .lt("expires_at", now_iso)
+                .execute()
+            )
+            return res.data or []
+        except (APIError, HTTPError) as e:
+            self.logger.error("Failed to fetch expired drafts: %s", e)
+            return []
+
+    @_retry_on_network_error()
+    def get_approved_due(self):
+        "Return approved drafts whose scheduled_for is now or earlier."
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            res = (
+                self.client.table(self.drafts_table)
+                .select("*")
+                .eq("status", "approved")
+                .lte("scheduled_for", now_iso)
+                .order("scheduled_for", desc=False)
+                .execute()
+            )
+            return res.data or []
+        except (APIError, HTTPError) as e:
+            self.logger.error("Failed to fetch due drafts: %s", e)
+            return []
+
+    @_retry_on_network_error()
+    def count_drafts_since(self, character_name, since_iso):
+        "Count drafts created at or after `since_iso` for a given character."
+        try:
+            res = (
+                self.client.table(self.drafts_table)
+                .select("draft_id", count="exact")
+                .eq("character_name", character_name)
+                .gte("created_at", since_iso)
+                .execute()
+            )
+            return res.count or 0
+        except (APIError, HTTPError) as e:
+            self.logger.error("Failed to count drafts: %s", e)
+            return 0
+
+    @_retry_on_network_error()
+    def get_recent_posted(self, character_name, limit=20):
+        "Return the last N posted drafts for a character (for LLM context)."
+        try:
+            res = (
+                self.client.table(self.drafts_table)
+                .select("*")
+                .eq("character_name", character_name)
+                .eq("status", "posted")
+                .order("posted_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            data = res.data or []
+            data.reverse()  # chronological
+            return data
+        except (APIError, HTTPError) as e:
+            self.logger.error("Failed to fetch recent posts: %s", e)
             return []
 
     # =========================

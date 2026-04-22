@@ -420,8 +420,12 @@ class OpenChat:
             textarea = self.driver.find_element(
                 By.CSS_SELECTOR, '[data-testid="dm-composer-textarea"]'
             )
+            textarea.click()
             textarea.clear()
-            textarea.send_keys(text)
+            # send_keys only supports BMP chars (U+0000..U+FFFF); emojis like
+            # 💪 (U+1F4AA) break it. CDP Input.insertText handles arbitrary
+            # Unicode and still fires the input events the composer listens to.
+            self.driver.execute_cdp_cmd("Input.insertText", {"text": text})
 
             time.sleep(1)
 

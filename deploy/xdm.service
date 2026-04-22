@@ -37,6 +37,9 @@ LimitNOFILE=4096
 # Environment=SUPABASE_URL=https://xxx.supabase.co
 # Environment=SUPABASE__SECRET_KEY=xxx
 # Environment=SUPABASE_DB_URL=postgresql://xxx
+# Environment=TELEGRAM_BOT_TOKEN=xxx
+# Environment=TELEGRAM_CHAT_ID=xxx
+# Environment=FAL_KEY=xxx
 
 [Install]
 WantedBy=multi-user.target
