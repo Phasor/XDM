@@ -63,6 +63,7 @@ CONFIG_TEMPLATE = {
         "model": "openai/gpt-3.5-turbo",
         "endpoint": "https://openrouter.ai/api/v1/chat/completions",
         "timeout": 30,
+        "character_file": "prompts/character.txt",
         "personality_file": "prompts/personality.txt",
     },
     "tweeting": {

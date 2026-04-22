@@ -16,8 +16,27 @@ class LLM:
         self.model = config["openrouter"]["model"]
         self.timeout = config["openrouter"]["timeout"]
 
+        # Optional character bio (same file the tweet composer uses) so DM
+        # replies stay in the same voice as the outbound tweets. The DM
+        # personality file layers on top with channel-specific rules.
+        character_text = ""
+        character_path = config["openrouter"].get("character_file")
+        if character_path:
+            try:
+                with open(character_path, "r", encoding="utf-8") as f:
+                    character_text = f.read().strip()
+            except OSError as e:
+                self.logger.warning(
+                    "character_file %s not loaded: %s", character_path, e,
+                )
+
         with open(config["openrouter"]["personality_file"], "r", encoding="utf-8") as f:
-            self.personality = f.read()
+            dm_rules = f.read()
+
+        if character_text:
+            self.personality = character_text + "\n\n---\n\n" + dm_rules
+        else:
+            self.personality = dm_rules
 
     def get_response(self, chat_history, max_retries=2):
         "Send messages to LLM and get response, with retry for transient errors"
