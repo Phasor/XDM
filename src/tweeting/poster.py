@@ -133,9 +133,14 @@ class TweetPoster:
         raise RuntimeError("Post did not confirm within timeout")
 
     def _extract_tweet_url_from_toast(self):
+        "Return the newly-posted tweet URL from the success toast, or None."
+        # A bare a[href*='/status/'] matches ANY tweet link on the page, and
+        # X redirects the compose tab to the home feed on success — so the
+        # first match is usually some random tweet from the feed, not ours.
+        # Scope strictly to the success toast container.
         try:
             links = self.driver.find_elements(
-                By.CSS_SELECTOR, 'a[href*="/status/"]'
+                By.CSS_SELECTOR, '[data-testid="toast"] a[href*="/status/"]'
             )
             for link in links:
                 href = link.get_attribute("href") or ""
