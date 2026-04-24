@@ -36,6 +36,7 @@
         "require_approval": true,
         "character_name": "default",
         "character_file": "prompts/character.txt",
+        "character_reference_images": [],
         "context_recent_posts": 20,
         "draft_expiry_hours": 4,
         "schedule_enabled": false,
@@ -51,8 +52,13 @@
     },
     "fal_ai": {
         "api_key": "",
-        "model": "fal-ai/nano-banana",
-        "timeout_seconds": 120,
+        "mode": "flux_lora",
+        "model": "fal-ai/flux-lora",
+        "lora_url": "",
+        "lora_scale": 1.0,
+        "trigger_phrase": "",
+        "image_size": "portrait_16_9",
+        "timeout_seconds": 180,
         "image_dir": "generated_images"
     },
     "urls": {
