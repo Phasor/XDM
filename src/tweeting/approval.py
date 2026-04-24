@@ -52,6 +52,27 @@ class ApprovalFlow:
         self._send_for_approval(draft_id, composed["text"], image_path)
         return draft_id
 
+    def create_draft_from_prompt(self, image_prompt):
+        "Render the user-supplied image prompt and compose tweet text to match."
+        draft_id = uuid.uuid4().hex[:12]
+        recent = self.supabase.get_recent_posted(
+            self.character_name, limit=self.context_recent,
+        )
+        composed = self.composer.compose_for_prompt(image_prompt, recent)
+        if not composed:
+            self.tg.send_message(
+                "⚠️ Composer returned no text for your prompt (LLM failure).",
+            )
+            return None
+
+        image_path = self._maybe_render_image(image_prompt, draft_id)
+        row = self._insert_pending(draft_id, composed, image_path)
+        if not row:
+            return None
+
+        self._send_for_approval(draft_id, composed["text"], image_path)
+        return draft_id
+
     def regenerate(self, draft_id):
         "Replace an existing draft's text+image with a freshly-generated pair."
         existing = self.supabase.get_draft(draft_id)

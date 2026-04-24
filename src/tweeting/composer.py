@@ -26,16 +26,45 @@ class TweetComposer:
         "yesterday, you are no longer at the airport today).\n\n"
         "Respond with ONLY a JSON object, no surrounding commentary:\n"
         '{"text": "<the tweet, max 280 chars>", '
-        '"image_prompt": "<describe a photo to attach, or null>"}\n\n'
+        '"image_prompt": "<describe a SCENE to render, or null>"}\n\n'
         "Include an image_prompt only when the tweet would NATURALLY include "
         "a photo (selfies, food, views, objects you're holding). Pure thoughts "
-        "and reactions don't need images. Most tweets should have null.\n\n"
+        "and reactions don't need images.\n\n"
+        "IMPORTANT about image_prompt: reference photos of the character "
+        "(appearance, hair, build, face) are supplied separately to the image "
+        "model, so DO NOT describe the character's physical appearance. "
+        "Describe the SCENE only: location, pose/action, lighting, outfit, "
+        "framing (mirror selfie / street candid / close-up), mood. Treat it "
+        "as directing a photographer who already knows who the subject is.\n\n"
+        "Examples of good image_prompts:\n"
+        "- \"gym mirror selfie, black matching gym set, ponytail, natural "
+        "gym lighting, full-length phone shot\"\n"
+        "- \"matcha drink on a marble cafe table, morning light, overhead "
+        "phone shot, no face in frame\"\n"
+        "- \"walking candid on a london street, white trainers visible, "
+        "pavement from the waist down, overcast daylight\"\n\n"
         "Never mention being an AI, bot, or language model."
     )
 
     REGEN_SUFFIX = (
         "\n\nThe user rejected your previous draft. Produce a DIFFERENT "
         "tweet — a different angle, topic, or mood than before."
+    )
+
+    INSTRUCTIONS_FOR_PROMPT = (
+        "You are the character described above. The user has already "
+        "decided what photo they want to post — the scene is given to you "
+        "below. Your job is to write ONE tweet (max 280 chars) in the "
+        "character's voice that fits naturally as a caption for this "
+        "photo.\n\n"
+        "Review the recent posts provided to avoid repeating yourself and "
+        "keep life events coherent.\n\n"
+        "Respond with ONLY a JSON object, no surrounding commentary:\n"
+        '{"text": "<the tweet>"}\n\n'
+        "Do not describe the image literally — the image speaks for "
+        "itself. Write a caption that complements it: a thought, an "
+        "observation, a reaction. Never mention being an AI, bot, or "
+        "language model."
     )
 
     def __init__(self, config):
@@ -73,6 +102,36 @@ class TweetComposer:
         if raw is None:
             return None
         return self._parse_json(raw)
+
+    def compose_for_prompt(self, image_prompt, recent_posts):
+        """Generate tweet text to caption a user-supplied image scene.
+
+        Returns {"text": str, "image_prompt": str} — image_prompt echoes
+        back the user's input so downstream code treats the result the
+        same as a regular compose() output. None on failure.
+        """
+        system = self.character + "\n\n" + self.INSTRUCTIONS_FOR_PROMPT
+        user_content = self._format_recent(recent_posts)
+        user_content += (
+            "\n\nYou are about to post a photo described as:\n"
+            f"{image_prompt}\n\n"
+            "Write the tweet text to caption this photo."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ]
+
+        raw = self._call_llm(messages)
+        if raw is None:
+            return None
+        parsed = self._parse_json(raw)
+        if parsed is None:
+            return None
+        # Override whatever image_prompt the LLM returned (if any) with the
+        # user's authoritative version.
+        parsed["image_prompt"] = image_prompt
+        return parsed
 
     def _format_recent(self, recent_posts):
         if not recent_posts:

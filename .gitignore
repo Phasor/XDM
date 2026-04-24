@@ -13,6 +13,12 @@ downloaded_files/
 # Generated tweet images
 generated_images/
 
+# Character reference images (personal / copyrighted, per-deployment)
+reference_images/
+
+# LoRA training data (one-off assets, keep out of git)
+lora_training/
+
 # Config with credentials (use env vars or create locally)
 config.json
 

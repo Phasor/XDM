@@ -1,7 +1,17 @@
 """
 Telegram receive-side bot: long-polls getUpdates in a background thread and
-dispatches callback_query clicks, /compose commands, and reply-based edits
-to the draft lifecycle.
+dispatches callback_query clicks, slash commands, and reply-based edits to
+the draft lifecycle.
+
+Supported user actions:
+- /compose                        → LLM writes a draft from scratch
+- /prompt <scene description>     → user supplies the image prompt; LLM
+                                    writes tweet text to match
+- Approve / Regen / Reject /      → inline-button actions on each draft
+  Edit
+- Reply to draft message          → also edits the text
+- Reply to ✏️ Edit prompt         → edits the text (stateless — draft_id
+                                    is embedded in the prompt message)
 
 Driver-free by design: this thread never touches the Selenium driver. It
 reads/writes Supabase and makes Telegram HTTP calls. Heavy work (compose
@@ -11,6 +21,8 @@ compose_queue.
 Authorization is a hard chat_id check — any update from a different chat
 is logged and ignored.
 """
+
+import re
 
 import logging
 import os
@@ -144,6 +156,8 @@ class TelegramBot:
             self._reject(draft_id, chat_id, message_id, cq["id"])
         elif action == "regen":
             self._regen(draft_id, chat_id, message_id, cq["id"])
+        elif action == "edit":
+            self._edit(draft_id, cq["id"])
         else:
             self.answer_callback_query(cq["id"], text="Unknown action")
 
@@ -155,15 +169,39 @@ class TelegramBot:
 
         text = (msg.get("text") or "").strip()
 
-        # /compose command — queue a fresh draft for the main loop.
+        # /compose — LLM writes a draft from scratch.
         if text == "/compose":
             self.compose_queue.put({"type": "new"})
             self.send_message("📝 Queued a new draft…")
             return
 
-        # Reply to an existing draft message → treat as edit.
+        # /prompt <image description> — user supplies the scene; LLM writes
+        # tweet text to match.
+        if text.startswith("/prompt"):
+            image_prompt = text[len("/prompt"):].strip()
+            if not image_prompt:
+                self.send_message(
+                    "Usage: /prompt <describe the scene you want>\n\n"
+                    "Example: /prompt walking through covent garden with "
+                    "an iced matcha, sunny afternoon"
+                )
+                return
+            self.compose_queue.put({
+                "type": "prompt",
+                "image_prompt": image_prompt,
+            })
+            self.send_message("📝 Queued a draft from your prompt…")
+            return
+
+        # Reply to a message — either an Edit-button prompt (stateless,
+        # draft_id is in the prompt text) or a direct reply to a draft.
         reply_to = msg.get("reply_to_message")
         if reply_to and text:
+            replied_text = reply_to.get("text") or ""
+            draft_id_from_prompt = self._parse_draft_id_from_edit_prompt(replied_text)
+            if draft_id_from_prompt:
+                self._apply_edit_by_draft_id(draft_id_from_prompt, text)
+                return
             self._apply_edit(chat_id, reply_to.get("message_id"), text)
 
     # =========================
@@ -221,22 +259,69 @@ class TelegramBot:
             self._format_status(draft["text"], "🔄 Regenerating…"),
         )
 
+    def _edit(self, draft_id, cq_id):
+        "Send a force_reply prompt so the user can type replacement text."
+        draft = self.supabase.get_draft(draft_id)
+        if not draft:
+            self.answer_callback_query(cq_id, text="Draft not found")
+            return
+        if draft["status"] != "pending":
+            self.answer_callback_query(
+                cq_id, text=f"Already {draft['status']}",
+            )
+            return
+
+        # Embed draft_id in the prompt text so we can recover it from the
+        # user's reply without any in-memory state.
+        self.send_message(
+            f"✏️ Edit draft `{draft_id}` — reply with your replacement text.",
+            reply_markup={"force_reply": True, "selective": True},
+            parse_mode="Markdown",
+        )
+        self.answer_callback_query(cq_id, text="Awaiting edit…")
+
     def _apply_edit(self, chat_id, replied_msg_id, new_text):
+        "Edit path for when the user replies directly to the draft message."
         draft = self.supabase.get_draft_by_telegram(chat_id, replied_msg_id)
         if not draft:
             return  # reply wasn't to a draft we know about
+        self._apply_text_update(draft, new_text)
+
+    def _apply_edit_by_draft_id(self, draft_id, new_text):
+        "Edit path for when the user replies to the Edit-button prompt."
+        draft = self.supabase.get_draft(draft_id)
+        if not draft:
+            self.send_message(f"⚠️ Draft `{draft_id}` not found.", parse_mode="Markdown")
+            return
+        self._apply_text_update(draft, new_text)
+
+    def _apply_text_update(self, draft, new_text):
         if draft["status"] != "pending":
             self.send_message(
                 f"⚠️ Can't edit — draft is {draft['status']}.",
             )
             return
         self.supabase.update_draft(draft["draft_id"], {"text": new_text})
+        chat_id = draft.get("telegram_chat_id")
+        message_id = draft.get("telegram_message_id")
+        if not (chat_id and message_id):
+            return
         self.edit_body(
-            chat_id, replied_msg_id,
+            chat_id, message_id,
             self._format_draft_body(new_text),
             has_image=bool(draft.get("image_path")),
             reply_markup=self._draft_keyboard(draft["draft_id"]),
         )
+
+    _EDIT_PROMPT_RE = re.compile(r"Edit draft `([a-f0-9]+)`")
+
+    @classmethod
+    def _parse_draft_id_from_edit_prompt(cls, text):
+        "Extract the draft_id from the text of an ✏️ Edit prompt message."
+        if not text or "Edit draft" not in text:
+            return None
+        match = cls._EDIT_PROMPT_RE.search(text)
+        return match.group(1) if match else None
 
     # =========================
     # Presentation helpers
@@ -245,16 +330,21 @@ class TelegramBot:
     @staticmethod
     def _draft_keyboard(draft_id):
         return {
-            "inline_keyboard": [[
-                {"text": "✅ Approve", "callback_data": f"approve:{draft_id}"},
-                {"text": "🔄 Regen", "callback_data": f"regen:{draft_id}"},
-                {"text": "❌ Reject", "callback_data": f"reject:{draft_id}"},
-            ]],
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Approve", "callback_data": f"approve:{draft_id}"},
+                    {"text": "🔄 Regen", "callback_data": f"regen:{draft_id}"},
+                ],
+                [
+                    {"text": "✏️ Edit", "callback_data": f"edit:{draft_id}"},
+                    {"text": "❌ Reject", "callback_data": f"reject:{draft_id}"},
+                ],
+            ],
         }
 
     @staticmethod
     def _format_draft_body(text):
-        return f"📝 Draft\n\n{text}\n\n(Reply with text to edit.)"
+        return f"📝 Draft\n\n{text}"
 
     @staticmethod
     def _format_status(text, status_line):
@@ -267,7 +357,7 @@ class TelegramBot:
     def _url(self, method):
         return self.API_BASE.format(token=self.bot_token) + "/" + method
 
-    def send_message(self, text, reply_markup=None):
+    def send_message(self, text, reply_markup=None, parse_mode=None):
         payload = {
             "chat_id": self.chat_id,
             "text": text,
@@ -275,6 +365,8 @@ class TelegramBot:
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
         try:
             resp = requests.post(self._url("sendMessage"), json=payload, timeout=15)
             resp.raise_for_status()

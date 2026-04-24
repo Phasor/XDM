@@ -570,8 +570,11 @@ class XAutomation:
                 return
 
             try:
-                if req["type"] == "regen":
+                req_type = req.get("type")
+                if req_type == "regen":
                     self.approval.regenerate(req["replace_draft_id"])
+                elif req_type == "prompt":
+                    self.approval.create_draft_from_prompt(req["image_prompt"])
                 else:
                     self.approval.create_new_draft()
             except Exception as e:
