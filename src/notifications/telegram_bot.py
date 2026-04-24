@@ -225,9 +225,11 @@ class TelegramBot:
             "scheduled_for": datetime.now(timezone.utc).isoformat(),
         })
         self.answer_callback_query(cq_id, text="✅ Approved")
-        self.edit_message_text(
+        # Photo drafts need editMessageCaption, text drafts need editMessageText.
+        self.edit_body(
             chat_id, message_id,
             self._format_status(draft["text"], "✅ Approved, posting soon"),
+            has_image=bool(draft.get("image_path")),
         )
 
     def _reject(self, draft_id, chat_id, message_id, cq_id):
@@ -237,9 +239,10 @@ class TelegramBot:
             return
         self.supabase.update_draft(draft_id, {"status": "rejected"})
         self.answer_callback_query(cq_id, text="❌ Rejected")
-        self.edit_message_text(
+        self.edit_body(
             chat_id, message_id,
             self._format_status(draft["text"], "❌ Rejected"),
+            has_image=bool(draft.get("image_path")),
         )
 
     def _regen(self, draft_id, chat_id, message_id, cq_id):
@@ -254,9 +257,10 @@ class TelegramBot:
             "replace_draft_id": draft_id,
         })
         self.answer_callback_query(cq_id, text="🔄 Regenerating…")
-        self.edit_message_text(
+        self.edit_body(
             chat_id, message_id,
             self._format_status(draft["text"], "🔄 Regenerating…"),
+            has_image=bool(draft.get("image_path")),
         )
 
     def _edit(self, draft_id, cq_id):
@@ -272,11 +276,13 @@ class TelegramBot:
             return
 
         # Embed draft_id in the prompt text so we can recover it from the
-        # user's reply without any in-memory state.
+        # user's reply without any in-memory state. Plain text, no markdown
+        # — Telegram strips formatting characters (backticks etc) from the
+        # stored text.text, keeping them only in the entities array, so a
+        # regex that expected them would never match on reply.
         self.send_message(
-            f"✏️ Edit draft `{draft_id}` — reply with your replacement text.",
+            f"✏️ Edit draft {draft_id} — reply with your replacement text.",
             reply_markup={"force_reply": True, "selective": True},
-            parse_mode="Markdown",
         )
         self.answer_callback_query(cq_id, text="Awaiting edit…")
 
@@ -313,7 +319,7 @@ class TelegramBot:
             reply_markup=self._draft_keyboard(draft["draft_id"]),
         )
 
-    _EDIT_PROMPT_RE = re.compile(r"Edit draft `([a-f0-9]+)`")
+    _EDIT_PROMPT_RE = re.compile(r"Edit draft `?([a-f0-9]+)")
 
     @classmethod
     def _parse_draft_id_from_edit_prompt(cls, text):
