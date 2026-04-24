@@ -44,18 +44,32 @@ class FakeSupabase:
 
 
 class FakeComposer:
-    "Returns pre-programmed compose results per call (normal / regen)."
+    "Returns pre-programmed compose results per call (normal / regen / prompt)."
 
-    def __init__(self, results):
+    def __init__(self, results=None, prompt_results=None):
         # list of dict-or-None, consumed FIFO
-        self.results = list(results)
+        self.results = list(results or [])
+        self.prompt_results = list(prompt_results or [])
         self.calls = []
+        self.prompt_calls = []
 
     def compose(self, recent_posts, regen=False):
         self.calls.append({"recent": recent_posts, "regen": regen})
         if not self.results:
             return None
         return self.results.pop(0)
+
+    def compose_for_prompt(self, image_prompt, recent_posts):
+        self.prompt_calls.append({
+            "image_prompt": image_prompt, "recent": recent_posts,
+        })
+        if not self.prompt_results:
+            return None
+        parsed = self.prompt_results.pop(0)
+        if parsed is not None:
+            parsed = dict(parsed)
+            parsed["image_prompt"] = image_prompt  # mirror real composer
+        return parsed
 
 
 class FakeImageGen:
@@ -158,6 +172,7 @@ def _config(require_approval=True, character="alice"):
 
 def make_flow(
     compose_results=None,
+    prompt_results=None,
     image_path=None,
     image_enabled=True,
     require_approval=True,
@@ -168,7 +183,7 @@ def make_flow(
     sb = FakeSupabase(
         pending_expired=pending_expired, recent_posted=recent_posted,
     )
-    composer = FakeComposer(compose_results or [])
+    composer = FakeComposer(results=compose_results, prompt_results=prompt_results)
     image_gen = FakeImageGen(path=image_path, enabled=image_enabled)
     tg = FakeTelegramBot(enabled=tg_enabled)
     flow = ApprovalFlow(_config(require_approval), sb, composer, image_gen, tg)
@@ -426,3 +441,93 @@ def test_report_failure_edits_tg_with_reason():
     last = tg.edit_body_calls[-1]
     assert "Post failed" in last["body"]
     assert "compose button not clickable" in last["body"]
+
+
+# =========================
+# /prompt flow + origin-aware regeneration
+# =========================
+
+def test_create_new_draft_tags_origin_compose():
+    flow, sb, _comp, _img, _tg = make_flow(
+        compose_results=[{"text": "from compose", "image_prompt": None}],
+    )
+    draft_id = flow.create_new_draft()
+    assert sb.rows[draft_id]["origin"] == "compose"
+
+
+def test_create_draft_from_prompt_happy_path():
+    flow, sb, composer, image_gen, tg = make_flow(
+        prompt_results=[{"text": "captioned"}],
+        image_path="/tmp/p.png",
+    )
+    draft_id = flow.create_draft_from_prompt("a sunny park bench")
+
+    # compose_for_prompt called with user's prompt
+    assert composer.prompt_calls[0]["image_prompt"] == "a sunny park bench"
+    # image_gen called with user's prompt (not the composer's)
+    assert image_gen.calls == [("a sunny park bench", draft_id)]
+    # draft row stores the user's prompt + origin='prompt'
+    assert sb.rows[draft_id]["image_prompt"] == "a sunny park bench"
+    assert sb.rows[draft_id]["origin"] == "prompt"
+    assert sb.rows[draft_id]["image_path"] == "/tmp/p.png"
+    # sent as photo since image_path is set
+    assert len(tg.sent_photo_drafts) == 1
+
+
+def test_create_draft_from_prompt_composer_fails():
+    flow, sb, _comp, _img, tg = make_flow(prompt_results=[None])
+    result = flow.create_draft_from_prompt("some scene")
+
+    assert result is None
+    assert sb.rows == {}
+    assert any("⚠️" in m["text"] for m in tg.sent_messages)
+
+
+def test_regenerate_prompt_origin_preserves_image_prompt():
+    "Regen on a /prompt-originated draft reuses the user's image_prompt."
+    flow, sb, composer, image_gen, tg = make_flow(
+        prompt_results=[
+            {"text": "first caption"},   # initial create_draft_from_prompt
+            {"text": "second caption"},  # regen
+        ],
+        image_path="/tmp/p.png",
+    )
+    draft_id = flow.create_draft_from_prompt("matcha on a cafe table")
+
+    # Reset tracking state we only care about from the regen onwards
+    image_gen_calls_before = len(image_gen.calls)
+    compose_calls_before = len(composer.calls)
+    prompt_calls_before = len(composer.prompt_calls)
+
+    flow.regenerate(draft_id)
+
+    # Regen should use compose_for_prompt, NOT the generic compose()
+    assert len(composer.calls) == compose_calls_before
+    assert len(composer.prompt_calls) == prompt_calls_before + 1
+    # compose_for_prompt called with the original prompt
+    assert composer.prompt_calls[-1]["image_prompt"] == "matcha on a cafe table"
+    # Image gen called with the original prompt (not a new one)
+    new_image_calls = image_gen.calls[image_gen_calls_before:]
+    assert new_image_calls == [("matcha on a cafe table", draft_id)]
+    # Draft row still has the user's original prompt
+    assert sb.rows[draft_id]["image_prompt"] == "matcha on a cafe table"
+    assert sb.rows[draft_id]["text"] == "second caption"
+
+
+def test_regenerate_compose_origin_does_full_regen():
+    "Regen on a /compose-originated draft still regenerates everything."
+    flow, sb, composer, image_gen, tg = make_flow(
+        compose_results=[
+            {"text": "old text", "image_prompt": "old scene"},
+            {"text": "new text", "image_prompt": "new scene"},
+        ],
+    )
+    draft_id = flow.create_new_draft()
+    flow.regenerate(draft_id)
+
+    # Regen used the generic compose path (regen=True), not compose_for_prompt
+    assert composer.calls[-1]["regen"] is True
+    assert composer.prompt_calls == []
+    # image_prompt was replaced with the LLM's new one
+    assert sb.rows[draft_id]["image_prompt"] == "new scene"
+    assert sb.rows[draft_id]["text"] == "new text"

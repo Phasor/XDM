@@ -45,7 +45,7 @@ class ApprovalFlow:
             return None
 
         image_path = self._maybe_render_image(composed.get("image_prompt"), draft_id)
-        row = self._insert_pending(draft_id, composed, image_path)
+        row = self._insert_pending(draft_id, composed, image_path, origin="compose")
         if not row:
             return None
 
@@ -66,7 +66,7 @@ class ApprovalFlow:
             return None
 
         image_path = self._maybe_render_image(image_prompt, draft_id)
-        row = self._insert_pending(draft_id, composed, image_path)
+        row = self._insert_pending(draft_id, composed, image_path, origin="prompt")
         if not row:
             return None
 
@@ -74,13 +74,29 @@ class ApprovalFlow:
         return draft_id
 
     def regenerate(self, draft_id):
-        "Replace an existing draft's text+image with a freshly-generated pair."
+        """Replace an existing draft's text+image with a freshly-generated pair.
+
+        For drafts whose `origin='prompt'` (user supplied the scene via
+        /prompt), the user's original image_prompt is preserved: we
+        regenerate only the tweet text and the image render. For
+        `origin='compose'` (LLM invented both), we fully regenerate.
+        """
         existing = self.supabase.get_draft(draft_id)
         if not existing:
             self.logger.warning("regen target not found: %s", draft_id)
             return None
 
-        composed = self._compose(regen=True)
+        origin = existing.get("origin") or "compose"
+        preserved_prompt = existing.get("image_prompt") if origin == "prompt" else None
+
+        if preserved_prompt:
+            recent = self.supabase.get_recent_posted(
+                self.character_name, limit=self.context_recent,
+            )
+            composed = self.composer.compose_for_prompt(preserved_prompt, recent)
+        else:
+            composed = self._compose(regen=True)
+
         if not composed:
             self.tg.send_message(
                 f"⚠️ Regeneration failed for draft {draft_id}.",
@@ -162,11 +178,12 @@ class ApprovalFlow:
             self.logger.error("Image generation raised: %s", e)
             return None
 
-    def _insert_pending(self, draft_id, composed, image_path):
+    def _insert_pending(self, draft_id, composed, image_path, origin="compose"):
         expires_at = datetime.now(timezone.utc) + timedelta(hours=self.expiry_hours)
         row = {
             "draft_id": draft_id,
             "character_name": self.character_name,
+            "origin": origin,
             "text": composed["text"],
             "image_prompt": composed.get("image_prompt"),
             "image_path": image_path,

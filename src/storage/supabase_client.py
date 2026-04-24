@@ -84,6 +84,7 @@ class SupaBase:
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             draft_id text UNIQUE NOT NULL,
             character_name text NOT NULL,
+            origin text DEFAULT 'compose',
             text text NOT NULL,
             image_prompt text,
             image_path text,
@@ -99,6 +100,10 @@ class SupaBase:
             created_at timestamptz DEFAULT now(),
             updated_at timestamptz DEFAULT now()
         );
+
+        -- Backfill `origin` on existing deployments that pre-date the column.
+        ALTER TABLE {self.drafts_table}
+            ADD COLUMN IF NOT EXISTS origin text DEFAULT 'compose';
 
         CREATE INDEX IF NOT EXISTS idx_drafts_status
         ON {self.drafts_table}(status);
